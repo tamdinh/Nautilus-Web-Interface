@@ -18,7 +18,6 @@ import FeaturesPage from "./pages/FeaturesPage";
 import AdaptersPage from "./pages/AdaptersPage";
 import MonitoringPage from "./pages/MonitoringPage";
 import SettingsPage from "./pages/SettingsPage";
-import AdminDBPage from "./pages/AdminDBPage";
 import DocsPage from "./pages/DocsPage";
 import StrategiesPage from "./pages/StrategiesPage";
 import OrdersPage from "./pages/OrdersPage";
@@ -78,7 +77,6 @@ function Router() {
       <Route path="/admin/adapters" component={AdaptersPage} />
       <Route path="/admin/monitoring" component={MonitoringPage} />
       <Route path="/admin/settings" component={SettingsPage} />
-      <Route path="/admin/database-management" component={AdminDBPage} />
       <Route path="/admin/users" component={UsersPage} />
       <Route path="/trader" component={TraderDashboard} />
       <Route path="/trader/strategies" component={StrategiesPage} />
