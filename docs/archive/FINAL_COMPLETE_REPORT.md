@@ -1,3 +1,5 @@
+> **HISTORICAL DOCUMENT (archived 2026-10-29).** Written before the NautilusTrader 2.0.0rc8 migration and the production hardening. It may be inaccurate and is NOT a statement that the system is production ready. See docs/NAUTILUS_TRADER_2_UPGRADE_PLAN.md and docs/DOKPLOY_RUNBOOK.md.
+
 # 🚀 Nautilus Trader Web Interface - Final Complete Report
 
 **Project**: Nautilus Trader Web Interface  

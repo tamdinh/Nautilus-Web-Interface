@@ -39,9 +39,9 @@ USER appuser
 
 EXPOSE 8000
 
-# /health answers as soon as the app is up; startup itself fails closed on bad configuration
+# /readyz checks DB + engine; startup itself fails closed on bad configuration
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+    CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz', timeout=5)"]
 
 # Single process on purpose (do not add uvicorn/gunicorn workers)
 CMD ["python3", "nautilus_fastapi.py"]

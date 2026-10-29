@@ -7,6 +7,8 @@
 [![React](https://img.shields.io/badge/react-18+-61DAFB.svg)](https://reactjs.org/)
 [![TypeScript](https://img.shields.io/badge/typescript-5+-3178C6.svg)](https://www.typescriptlang.org/)
 
+> **Risk disclaimer.** This software is provided as is, without warranty. Trading, especially with leverage, can lose all your capital. It runs on a release-candidate engine and has not completed testnet validation or a staging soak (see `docs/NAUTILUS_TRADER_2_UPGRADE_PLAN.md`). Do not trade real money with it until those gates pass. You are solely responsible for any use.
+
 ## Overview
 
 Nautilus Web Interface is a full-stack admin and trading dashboard for [Nautilus Trader](https://nautilustrader.io/) — a high-performance algorithmic trading platform. It provides a modern web UI to manage strategies, monitor positions, control risk, view live market data, and run backtests.
@@ -20,7 +22,7 @@ Nautilus Web Interface is a full-stack admin and trading dashboard for [Nautilus
 - **Real-time WebSocket** — Live engine/position/risk updates pushed to the frontend
 - **API Key Auth** — Optional API key protection (set `API_KEY` env var to enable)
 - **Configurable CORS** — Strict origin allowlist via `CORS_ORIGINS` env var
-- **Cloudflare Pages Ready** — Frontend builds and deploys to Cloudflare Pages out of the box
+- **Paper / live modes with kill switch** — Paper by default; live trading is explicit, TOTP step-up protected and fail-closed (see the upgrade plan)
 
 ## Architecture
 
@@ -103,10 +105,9 @@ Nautilus-Web-Interface/
 │   ├── .env.example             # Environment variable template
 │   └── package.json
 ├── docs/
-│   ├── DEPLOYMENT_GUIDE.md
-│   ├── CLOUDFLARE_PAGES_SETUP.md
-│   └── NAUTILUS_ADMIN_COMPLETE.md
-└── deploy_to_vps.sh             # Automated VPS deployment script
+│   ├── NAUTILUS_TRADER_2_UPGRADE_PLAN.md
+│   ├── DOKPLOY_RUNBOOK.md
+│   └── archive/                 # Historical reports (not current)
 ```
 
 ## Pages
@@ -231,9 +232,6 @@ NAUTILUS_API_PORT=8000
 # Backend API base URL
 VITE_NAUTILUS_API_URL=http://localhost:8000
 
-# Admin DB API base URL
-VITE_ADMIN_DB_API_URL=http://localhost:8001
-
 # WebSocket URL
 VITE_WS_URL=ws://localhost:8000
 
@@ -243,15 +241,8 @@ VITE_API_KEY=
 
 ## Deployment
 
-See [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) for full VPS / Docker / systemd instructions.
-
-See [docs/CLOUDFLARE_PAGES_SETUP.md](docs/CLOUDFLARE_PAGES_SETUP.md) for Cloudflare Pages frontend deployment.
-
-A fully automated deployment script is also available:
-
-```bash
-DOMAIN=yourdomain.com bash deploy_to_vps.sh
-```
+Docker on Dokploy is the only supported target. See [docs/DOKPLOY_RUNBOOK.md](docs/DOKPLOY_RUNBOOK.md).
+Older VPS / Cloudflare Pages guides were moved to `docs/archive/` and are no longer supported.
 
 ## Technology Stack
 
@@ -316,4 +307,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-**Version**: 2.0.0 | **Status**: Production Ready | **Last Updated**: March 2026
+**Version**: 2.0.0 (NautilusTrader 2.0.0rc8) | **Status**: Pre-production, live trading not yet approved | **Last Updated**: October 2026

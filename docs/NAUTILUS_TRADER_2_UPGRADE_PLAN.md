@@ -81,7 +81,7 @@ JWT trong localStorage và URL WebSocket, refresh không thu hồi; rate limit t
 ### Phase 0 — Điểm rollback và baseline (làm ngay, rất nhỏ)
 
 - [x] Khởi tạo git và commit baseline (`b13eb6f`, đã push lên `tamdinh/Nautilus-Web-Interface`). Nên tạo thêm tag cho điểm trước-migration nếu có image/commit cũ trên production.
-- [ ] `requirements.v1.lock.txt` từ `.venv-nt1` (1.231.0): vẫn chưa tạo; sao lưu `*.db`, catalog, `.env` của production trước khi deploy.
+- [x] `docs/requirements.v1.lock.txt` từ `.venv-nt1` (1.231.0) đã tạo (2026-10-29); còn: sao lưu `*.db`, catalog, `.env` của production trước khi deploy.
 - [x] Dọn file rác trong `backend/data` (backup do test tạo); test không còn ghi vào thư mục dữ liệu thật.
 
 ### Phase A — Khóa bề mặt tấn công (BLOCKING) — phần lớn đã làm (2026-10-29)
@@ -94,7 +94,8 @@ Findings #1, #2, #3, #8 (RBAC backend), #12, #13.
 - [x] Phân quyền: `require_trader` (admin hoặc trader) cho order, cancel, close/sync vị thế, strategy, backtest; token của user bị vô hiệu hóa/xóa mất quyền ngay và role lấy từ DB (không tin role trong JWT cũ). Mọi route `/api/*` ngoài danh sách public đều qua JWT middleware. **Lưu ý:** hiện chỉ có hai role `admin`/`trader`, chưa có `viewer` chỉ-đọc.
 - [x] Frontend: Admin pages dùng API client có auth; xóa `DatabaseManagementPage` (host bên thứ ba), các service không dùng, `mockApi.ts`, `.bak`, `ManusDialog`; thống nhất env (`VITE_NAUTILUS_API_URL`, `VITE_WS_URL`); `node:22`; bỏ `jsx-loc`/`express`/`pnpm`…; `npm ci` sạch, `tsc` và `build` pass; `RequireRole` cho `/admin*` (UX, backend vẫn là nơi cưỡng chế).
 - [x] Rate limit: `uvicorn` chạy `proxy_headers` với `FORWARDED_ALLOW_IPS` (mặc định chỉ `127.0.0.1`; trên Dokploy phải đặt mạng của Traefik), dọn dict khi lớn, khóa tạm theo username sau 10 lần sai/15 phút.
-- [ ] Còn lại của Phase A: `ApiConfigPage` gọi `/api/admin/routes/*` mà backend không có (trang cũ chưa bao giờ chạy đủ); `App.tsx` logout và `LoginPage` vẫn dùng `fetch` thô; `src/utils/testHelper.ts` còn nhắc `manusvm.computer`; hai đường dẫn tài liệu cũ nhắc cổng 8001 (`deploy_to_vps.sh`, `DEPLOYMENT_GUIDE.md`, `CLOUDFLARE_PAGES_SETUP.md`, các `FINAL_*_REPORT.md`); trên Dokploy cần đặt `FORWARDED_ALLOW_IPS` đúng mạng proxy và `CORS_ORIGINS` đúng domain.
+- [x] Đã dọn: xóa `ApiConfigPage` (gọi `/api/admin/routes/*` không tồn tại); `testHelper` chỉ bật ở development (bỏ cờ URL và `manusvm.computer`); tài liệu cũ nhắc cổng 8001 đã chuyển vào `docs/archive/`. `App.tsx` logout và `LoginPage` giữ `fetch` thô có chủ đích (login/logout không được kích hoạt luồng "401 → về login" của API client).
+- [ ] Còn lại của Phase A: trên Dokploy cần đặt `FORWARDED_ALLOW_IPS` đúng mạng proxy và `CORS_ORIGINS` đúng domain.
 
 **Cổng:** quét thủ công không còn endpoint ghi/nhạy cảm nào không xác thực (route inventory: mọi GET qua JWT middleware, mọi mutation qua `require_trader`/`require_admin`); deploy thiếu env thì container từ chối chạy. Đã kiểm chứng ở dev; chưa kiểm chứng trong container Docker/Dokploy.
 
@@ -110,7 +111,7 @@ Findings #1, #2, #3, #8 (RBAC backend), #12, #13.
 - [x] CI viết lại: Python 3.13/Node 22, `timeout-minutes`, `pytest --timeout`, typecheck và build blocking, `npm audit` và `pip-audit` blocking, job Docker (build + smoke test fail-closed + `/health` + header frontend), e2e API-level có auth (65/65 pass khi chạy thử cục bộ), bỏ deploy Cloudflare Pages. **Chưa chạy trên GitHub, Docker chưa build được trên máy này.**
 - [x] Docker: backend cài từ lock bằng `uv`, không chứa secret, chạy đúng 1 process; frontend dùng `nginx.conf` thật (security headers, cache), non-root `nginx-unprivileged` cổng 8080 (compose đã đổi `:8080`; **Dokploy phải trỏ domain tới cổng 8080**), stage `dist` (ý tưởng chingyap1).
 - [x] **Sửa lỗ hổng phát hiện thêm:** trang bật 2FA gửi secret TOTP (`otpauth://`) tới `api.qrserver.com`; nay render QR cục bộ (`qrcode.react`).
-- [ ] Còn lại: pin digest cho image `nginx-unprivileged`/`python` và uv; build Docker + chạy CI thật; `foreign_keys`; test report `pandas`; chunk frontend 844 kB (`manualChunks`, Phase E); dev-dependency audit (`npm audit` đầy đủ còn lỗi cần nâng major); `ENCRYPTION_KEY` trong CI đã sinh hợp lệ.
+- [ ] Còn lại: pin digest cho image `nginx-unprivileged`/`python` và uv; build Docker + chạy CI thật; `foreign_keys`; test report `pandas`; chunk frontend: đã tách vendor bằng `manualChunks` (còn `React.lazy` theo route, Phase E2); dev-dependency audit (`npm audit` đầy đủ còn lỗi cần nâng major); `ENCRYPTION_KEY` trong CI đã sinh hợp lệ.
 
 **Cổng:** CI xanh trên nhánh sạch, image build từ lockfile, `import nautilus_fastapi` và `/health` thật trong container. *Đã kiểm chứng cục bộ: toàn bộ test backend, typecheck, build frontend, e2e API; chưa kiểm chứng: Docker và CI trên GitHub.*
 
@@ -135,12 +136,13 @@ Findings #1, #2, #3, #8 (RBAC backend), #12, #13.
 ### Phase D — Vận hành trên Dokploy (BLOCKING một phần)
 
 - [ ] Frontend dùng đường dẫn tương đối `/api`, `/ws` qua Traefik (không nhúng URL lúc build); nginx với CSP, `nosniff`, `X-Frame-Options`; một đích deploy duy nhất (bỏ Cloudflare Pages).
-- [ ] `/readyz` kiểm tra DB và engine; logging JSON có request id; audit mọi route đổi trạng thái; alert vận hành (live-node ngắt, lệnh bị từ chối, vi phạm limit) qua outbox có retry; sửa Telegram `raise_for_status`.
+- [x] `/readyz` (DB + engine, 503 khi lỗi, dùng cho healthcheck compose); logging JSON có `X-Request-ID` (`logging_config.py`); Telegram `raise_for_status`; `/docs`/`/redoc`/`/openapi.json` tắt ở production; `/backups` cần admin.
+- [ ] Còn lại: audit mọi route đổi trạng thái; alert vận hành (live-node ngắt, lệnh bị từ chối, vi phạm limit, lệnh kẹt UNKNOWN) qua outbox có retry.
 - [ ] Backup theo lịch ra off-host (volume backup/S3), mã hóa, retention, diễn tập restore, bao phủ cả `admin_panel.db`; `/clean` không xóa FILLED; `/backups` cần admin.
-- [ ] Compose: bỏ `version`, thêm `start_period`, `init`, grace period, log rotation; đo RSS/khởi động trên RC8 để chốt `mem_limit` (512m chưa được đo).
+- [x] Compose: không có `version`, đã thêm `start_period`, `init`, `stop_grace_period`, log rotation (chưa chạy thật trên Docker). [ ] Đo RSS/khởi động trên RC8 để chốt `mem_limit` (512m chưa được đo).
 - [ ] *(học từ chingyap1)* Frontend Docker: stage `dist` + `Dockerfile.deploy` chỉ COPY để tránh chạy esbuild dưới QEMU khi build amd64 trên runner ARM (commit `028f795`); cần tự viết bước CI `buildx --target dist --output type=local`. Thay nginx config sinh bằng `printf` trong Dockerfile (dễ hỏng, từng có bug thiếu dấu `\n\` ở một dòng, fork Timsaysso790) bằng file `nginx.conf` thật được `COPY`; cân nhắc `proxy_read_timeout`/tắt buffering cho request dài và WebSocket.
 - [ ] *(cân nhắc sau)* Cảnh báo push VAPID (`push_notify.py`, `push_vapid.py`, có test): best-effort, không bao giờ raise, dedupe 300s, tự dọn subscription 404/410; nguyên tắc "push chỉ để gây chú ý, không bao giờ là quyền". Dedupe cần lưu bền nếu dùng.
-- [ ] Runbook Dokploy: env/secret, volume, domain, WebSocket, rollback. Tắt `/docs` ở production.
+- [x] Runbook Dokploy: `docs/DOKPLOY_RUNBOOK.md`; `/docs` tắt ở production. [ ] Backup off-host tự động vẫn chưa làm (chỉ ghi trong runbook).
 
 ### Phase E — Nâng cấp frontend (Trader panel và Admin panel)
 
@@ -152,9 +154,9 @@ Findings #1, #2, #3, #8 (RBAC backend), #12, #13.
 
 ### Phase F — Dọn dẹp và tài liệu
 
-- [ ] Disclaimer rủi ro ở README, màn đăng nhập, DocsPage; bỏ "Production Ready".
-- [ ] Chuyển các báo cáo cũ vào `docs/archive/` kèm banner "lịch sử"; giữ `REVIEW_OVERVIEW.md` làm bảng Real/Fake đã kiểm lại với RC8.
-- [ ] Thay `DEPLOYMENT_GUIDE.md`, `github-workflow-template.yml`, `deploy_to_vps.sh` bằng hướng dẫn Dokploy + uv, hoặc ghi rõ không còn hỗ trợ.
+- [x] Disclaimer rủi ro ở README và màn đăng nhập; bỏ "Production Ready" khỏi README. [ ] DocsPage.
+- [x] Báo cáo cũ đã chuyển vào `docs/archive/` kèm banner "lịch sử". [ ] `REVIEW_OVERVIEW.md` chưa kiểm lại với RC8.
+- [x] `DEPLOYMENT_GUIDE.md`, `github-workflow-template.yml`, `deploy_to_vps.sh`, `CLOUDFLARE_PAGES_SETUP.md` đã archive; thay bằng `DOKPLOY_RUNBOOK.md`.
 - [ ] Schema có version (`PRAGMA user_version` + migration có thứ tự), gộp hai nơi lưu alerts, index `orders(exchange_order_id)`, retention cho audit/`revoked_tokens`.
 
 ## Học hỏi từ hai fork (đã rà soát 2026-10-29)

@@ -32,14 +32,8 @@ declare global {
  */
 function shouldEnableTestHelper(): boolean {
   try {
-    // Enable in development, staging, or when explicitly requested
-    const env = process.env.NODE_ENV;
-    const isDevOrStaging = env === 'development' || env === 'staging';
-    const isExplicitlyEnabled = typeof window !== 'undefined' && 
-                                (window.location.search.includes('testHelper=true') ||
-                                 window.location.hostname.includes('manusvm.computer'));
-    
-    return isDevOrStaging || isExplicitlyEnabled;
+    // Development builds only: a URL flag must never switch test hooks on in production
+    return process.env.NODE_ENV === 'development';
   } catch (error) {
     // If any check fails, don't enable
     console.warn('[TestHelper] Environment check failed:', error);

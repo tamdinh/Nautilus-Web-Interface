@@ -65,10 +65,11 @@ class TelegramNotifier:
             return
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
+            resp = await client.post(
                 url,
                 json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
             )
+            resp.raise_for_status()
 
 
 # ── Module-level notifier singletons ─────────────────────────────────────────

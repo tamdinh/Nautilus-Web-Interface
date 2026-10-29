@@ -154,6 +154,9 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
           <p className="text-xs text-gray-400">
             Server: <span className="font-mono">{API_CONFIG.NAUTILUS_API_URL}</span>
           </p>
+          <p className="text-xs text-gray-400 mt-2">
+            Trading involves substantial risk of loss. Software provided as is, without warranty.
+          </p>
         </div>
       </div>
     </div>

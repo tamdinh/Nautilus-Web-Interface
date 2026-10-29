@@ -763,3 +763,22 @@ def test_component_bulk_start_stop_reflected_in_list(client):
 def test_component_unknown_id_reports_failure(client):
     r = client.post("/api/component/start", json={"component": "All components"})
     assert r.json()["success"] is False
+
+
+def test_readyz_reports_ready(client):
+    r = client.get("/readyz")
+    assert r.status_code in (200, 503)
+    assert set(r.json()["checks"]) == {"database", "engine"}
+
+
+def test_backups_requires_auth():
+    from fastapi.testclient import TestClient
+    import nautilus_fastapi
+    r = TestClient(nautilus_fastapi.app).get("/api/database/backups")
+    assert r.status_code in (401, 403)
+
+
+def test_request_id_echoed_and_generated(client):
+    assert client.get("/health", headers={"X-Request-ID": "abc-123"}).headers["x-request-id"] == "abc-123"
+    gen = client.get("/health", headers={"X-Request-ID": "bad id!!"}).headers["x-request-id"]
+    assert gen != "bad id!!" and len(gen) == 32

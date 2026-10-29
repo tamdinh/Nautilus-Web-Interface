@@ -28,6 +28,7 @@ import auth_jwt as _auth_module_jwt
 from auth_jwt import decode_token
 import admin_db_api
 import trading_control
+from logging_config import configure_logging, new_request_id, request_id_var
 from routers import (
     adapters,
     alerts,
@@ -134,11 +135,19 @@ async def lifespan(app: FastAPI):
 
 # ── App factory ───────────────────────────────────────────────────────────────
 
+configure_logging()
+
+_IS_PROD = os.getenv("ENVIRONMENT", "production").lower() == "production"
+
 app = FastAPI(
     title="Nautilus Trader API",
     description="Real Nautilus Trader integration API",
     version="2.0.0",
     lifespan=lifespan,
+    # Interactive docs only outside production
+    docs_url=None if _IS_PROD else "/docs",
+    redoc_url=None if _IS_PROD else "/redoc",
+    openapi_url=None if _IS_PROD else "/openapi.json",
 )
 
 # CORS — set CORS_ORIGINS env var in production (comma-separated)
@@ -217,6 +226,7 @@ _PUBLIC_PATHS = frozenset(
     [
         "/",
         "/health",
+        "/readyz",
         "/api/health",
         "/api/auth/login",
         "/api/auth/logout",
@@ -281,6 +291,18 @@ async def _count_requests(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    rid = new_request_id(request.headers.get("x-request-id"))
+    token = request_id_var.set(rid)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_var.reset(token)
+    response.headers["X-Request-ID"] = rid
+    return response
+
+
 # CORS must be added LAST so it is the outermost middleware: it has to answer
 # preflight OPTIONS requests (which carry no token) and add CORS headers to
 # 401/429 responses produced by the auth and rate-limit middleware above.
@@ -289,7 +311,8 @@ app.add_middleware(
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key", "Idempotency-Key", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
 )
 
 # ── Include routers ───────────────────────────────────────────────────────────
@@ -332,6 +355,24 @@ async def health_alias():
         "service": "nautilus-trader-api",
         "version": "2.0.0",
     }
+
+
+@app.get("/readyz")
+async def readyz():
+    """Readiness: database reachable and Nautilus engine initialised."""
+    checks: dict = {}
+    try:
+        async with database.connect() as db:
+            await db.execute("SELECT 1")
+        checks["database"] = "ok"
+    except Exception as exc:
+        checks["database"] = f"error: {type(exc).__name__}"
+    checks["engine"] = "ok" if nautilus_system.is_initialized else "not_initialized"
+    ready = all(v == "ok" for v in checks.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "checks": checks},
+    )
 
 
 # ── WebSocket live-data helpers ───────────────────────────────────────────────
@@ -463,6 +504,7 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port,
         log_level="info",
+        log_config=None,   # keep our JSON logging; uvicorn must not reinstall its own handlers
         proxy_headers=True,
         forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
     )

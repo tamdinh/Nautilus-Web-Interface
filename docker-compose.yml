@@ -38,13 +38,21 @@ services:
     volumes:
       - backend_data:/app/data
     restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: &log_rotation
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     mem_limit: 512m
     cpus: "1.0"
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 60s
 
   frontend:
     build:
@@ -61,6 +69,8 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
+    init: true
+    logging: *log_rotation
     mem_limit: 64m
     cpus: "0.25"
 

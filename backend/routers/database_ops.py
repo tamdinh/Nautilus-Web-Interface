@@ -71,7 +71,7 @@ async def backup_database(req: DatabaseOpRequest, _admin: dict = Depends(require
 
 
 @router.get("/backups")
-async def list_backups():
+async def list_backups(_admin: dict = Depends(require_admin)):
     """List all available backup files in the data directory."""
     db_dir = _db_path().parent
     backups = sorted(

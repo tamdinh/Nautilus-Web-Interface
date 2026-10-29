@@ -14,7 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 API_KEY = os.getenv("API_KEY", "")
 
 # Exact-match paths (O(1) set lookup)
-_PUBLIC_EXACT: frozenset[str] = frozenset({"/", "/health", "/api/health"})
+_PUBLIC_EXACT: frozenset[str] = frozenset({"/", "/health", "/readyz", "/api/health"})
 # Prefix paths — docs, openapi, etc. (checked sequentially, short list)
 _PUBLIC_PREFIXES: tuple[str, ...] = ("/docs", "/redoc", "/openapi.json")
 
