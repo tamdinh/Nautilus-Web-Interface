@@ -15,22 +15,52 @@ interface Strategy {
   };
 }
 
+interface StrategyType {
+  id: string;
+  label: string;
+  description: string;
+  default_config: Record<string, string | number>;
+}
+
+const FALLBACK_TYPES: StrategyType[] = [
+  { id: 'sma_crossover', label: 'SMA Crossover', description: '', default_config: { instrument_id: 'EUR/USD.SIM', bar_type: 'EUR/USD.SIM-1-MINUTE-BID-INTERNAL', fast_period: 10, slow_period: 20, trade_size: '100000' } },
+  { id: 'rsi', label: 'RSI Mean-Reversion', description: '', default_config: { instrument_id: 'EUR/USD.SIM', bar_type: 'EUR/USD.SIM-1-MINUTE-BID-INTERNAL', rsi_period: 14, oversold_level: 30, overbought_level: 70, trade_size: '100000' } },
+  { id: 'macd', label: 'MACD Crossover', description: '', default_config: { instrument_id: 'EUR/USD.SIM', bar_type: 'EUR/USD.SIM-1-MINUTE-BID-INTERNAL', fast_period: 12, slow_period: 26, signal_period: 9, trade_size: '100000' } },
+];
+
 export default function StrategiesPage() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [types, setTypes] = useState<StrategyType[]>(FALLBACK_TYPES);
   const [newStrategy, setNewStrategy] = useState({
     name: '',
     type: 'sma_crossover',
     description: '',
-    config: {}
   });
+  const [params, setParams] = useState<Record<string, string | number>>(FALLBACK_TYPES[0].default_config);
 
   useEffect(() => {
     fetchStrategies();
+    api
+      .get<{ types: StrategyType[] }>('/api/strategy-types')
+      .then((r) => {
+        if (r.types?.length) {
+          setTypes(r.types);
+          const first = r.types.find((t) => t.id === 'sma_crossover') ?? r.types[0];
+          setNewStrategy((s) => ({ ...s, type: first.id }));
+          setParams(first.default_config);
+        }
+      })
+      .catch(() => undefined); // fall back to the built-in list
   }, []);
+
+  const selectType = (id: string) => {
+    setNewStrategy({ ...newStrategy, type: id });
+    setParams(types.find((t) => t.id === id)?.default_config ?? {});
+  };
 
   const fetchStrategies = async () => {
     try {
@@ -47,9 +77,16 @@ export default function StrategiesPage() {
   const handleAddStrategy = async () => {
     setModalError(null);
     try {
-      await api.post('/api/strategies', newStrategy);
+      // Backend reads the parameters as top-level fields; numeric ones must be numbers
+      const defaults = types.find((t) => t.id === newStrategy.type)?.default_config ?? {};
+      const body: Record<string, unknown> = { ...newStrategy };
+      for (const [key, value] of Object.entries(params)) {
+        body[key] = typeof defaults[key] === 'number' ? Number(value) : String(value);
+      }
+      await api.post('/api/strategies', body);
       setShowAddModal(false);
-      setNewStrategy({ name: '', type: 'sma_crossover', description: '', config: {} });
+      setNewStrategy({ ...newStrategy, name: '', description: '' });
+      setParams(defaults);
       fetchStrategies();
     } catch (error) {
       setModalError(error instanceof Error ? error.message : 'Failed to add strategy');
@@ -100,6 +137,11 @@ export default function StrategiesPage() {
             {fetchError}
           </div>
         )}
+        <div className="mb-4 bg-blue-50 border border-blue-200 text-blue-900 rounded-lg px-4 py-3 text-sm">
+          Strategies are tested in <b>Backtesting</b> on simulated data. <b>Start</b> only marks a strategy as active
+          (used by the daily-loss halt); it does <b>not</b> place paper or live orders yet. Live orders are placed
+          manually from the Orders page.
+        </div>
         {/* Header */}
         <div className="flex justify-between items-center mb-8">
           <div>
@@ -149,11 +191,19 @@ export default function StrategiesPage() {
                       ? 'bg-green-100 text-green-800' 
                       : 'bg-gray-100 text-gray-800'
                   }`}>
-                    {strategy.status}
+                    {strategy.status === 'running' ? 'active (no orders)' : strategy.status}
                   </span>
                 </div>
 
-                <p className="text-gray-600 text-sm mb-4">{strategy.description || 'No description'}</p>
+                <p className="text-gray-600 text-sm mb-2">{strategy.description || 'No description'}</p>
+                {strategy.config && Object.keys(strategy.config).length > 0 && (
+                  <p className="text-xs text-gray-500 mb-4 font-mono break-words">
+                    {Object.entries(strategy.config)
+                      .filter(([k]) => k !== 'bar_type')
+                      .map(([k, v]) => `${k}=${v}`)
+                      .join(' · ')}
+                  </p>
+                )}
 
                 {/* Performance Metrics */}
                 <div className="bg-gray-50 rounded-lg p-4 mb-4">
@@ -207,7 +257,7 @@ export default function StrategiesPage() {
         {/* Add Strategy Modal */}
         {showAddModal && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-xl shadow-2xl p-8 max-w-md w-full">
+            <div className="bg-white rounded-xl shadow-2xl p-8 max-w-md w-full max-h-[90vh] overflow-y-auto">
               <h2 className="text-2xl font-bold text-gray-900 mb-6">Add New Strategy</h2>
               
               <div className="space-y-4">
@@ -226,12 +276,34 @@ export default function StrategiesPage() {
                   <label className="block text-sm font-semibold text-gray-700 mb-2">Strategy Type</label>
                   <select
                     value={newStrategy.type}
-                    onChange={(e) => setNewStrategy({ ...newStrategy, type: e.target.value })}
+                    onChange={(e) => selectType(e.target.value)}
                     className="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none"
                   >
-                    <option value="sma_crossover">SMA Crossover</option>
-                    <option value="rsi">RSI</option>
+                    {types.map((t) => (
+                      <option key={t.id} value={t.id}>{t.label}</option>
+                    ))}
                   </select>
+                  {types.find((t) => t.id === newStrategy.type)?.description && (
+                    <p className="mt-1 text-xs text-gray-500">{types.find((t) => t.id === newStrategy.type)?.description}</p>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {Object.entries(params).map(([key, value]) => {
+                    const numeric = typeof (types.find((t) => t.id === newStrategy.type)?.default_config ?? {})[key] === 'number';
+                    return (
+                      <div key={key} className={key === 'bar_type' ? 'col-span-2' : ''}>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">{key.replace(/_/g, ' ')}</label>
+                        <input
+                          type={numeric ? 'number' : 'text'}
+                          step="any"
+                          value={value}
+                          onChange={(e) => setParams({ ...params, [key]: e.target.value })}
+                          className="w-full px-3 py-2 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-sm"
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
 
                 <div>

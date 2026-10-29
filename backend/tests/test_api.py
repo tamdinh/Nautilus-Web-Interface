@@ -790,3 +790,15 @@ def test_mutations_are_audited(client):
     logs = client.get("/api/admin/audit-logs?limit=500").json()
     entries = logs.get("logs") or logs.get("entries") or logs
     assert any("http:POST /api/trading/kill" in str(e) for e in entries)
+
+
+def test_strategy_start_is_honest_and_params_are_used(client):
+    r = client.post("/api/strategies", json={
+        "name": "t", "type": "sma_crossover", "fast_period": 5, "slow_period": 15,
+        "instrument_id": "EUR/USD.SIM"})
+    assert r.status_code == 200
+    sid = r.json()["strategy_id"]
+    started = client.post(f"/api/strategies/{sid}/start").json()
+    assert started["executes_orders"] is False
+    listed = [s for s in client.get("/api/strategies").json()["strategies"] if s["id"] == sid][0]
+    assert listed["config"]["fast_period"] == 5 and listed["executes_orders"] is False

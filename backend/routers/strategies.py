@@ -22,6 +22,17 @@ def _nautilus():
 
 router = APIRouter(prefix="/api", tags=["strategies"])
 
+
+def _config_dict(cfg: Any) -> Dict[str, Any]:
+    """Strategy config (dict or dataclass) as plain JSON-safe values."""
+    import dataclasses
+    if dataclasses.is_dataclass(cfg) and not isinstance(cfg, type):
+        cfg = {f.name: getattr(cfg, f.name) for f in dataclasses.fields(cfg)}
+    if not isinstance(cfg, dict):
+        return {}
+    return {k: (v if isinstance(v, (int, float, str, bool)) or v is None else str(v))
+            for k, v in cfg.items() if k != "strategy_id"}
+
 # ── Supported strategy types ──────────────────────────────────────────────────
 
 _STRATEGY_TYPES = {
@@ -201,6 +212,8 @@ async def list_strategies():
                 "status": strategy["status"],
                 "description": strategy.get("description", ""),
                 "instrument": instrument,
+                "config": _config_dict(cfg),
+                "executes_orders": False,
                 "performance": {
                     "total_pnl": total_pnl,
                     "total_trades": total_trades,
@@ -326,8 +339,8 @@ async def start_strategy(strategy_id: str, _user: dict = Depends(require_trader)
     await database.update_strategy_status(strategy_id, "running")
     return {
         "success": True,
-        "message": f"Strategy {strategy_id} started",
-        "live_engine_registered": True,
+        "message": f"Strategy {strategy_id} marked active. It does not place orders: strategies only run in backtests.",
+        "executes_orders": False,
     }
 
 
@@ -340,5 +353,5 @@ async def stop_strategy(strategy_id: str, _user: dict = Depends(require_trader))
     return {
         "success": True,
         "message": f"Strategy {strategy_id} stopped",
-        "live_engine_registered": False,
+        "executes_orders": False,
     }
