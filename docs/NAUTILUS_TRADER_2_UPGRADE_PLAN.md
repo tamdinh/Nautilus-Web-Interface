@@ -152,6 +152,15 @@ Findings #1, #2, #3, #8 (RBAC backend), #12, #13.
 - **Backtest bất đồng bộ (E2/D):** *(ý tưởng từ Timsaysso790)* `POST /run` trả `job_id`, client polling `/status` và `/result`. Không copy bản của họ: dùng dict trong tiến trình hoặc bảng SQLite `jobs` với `asyncio.Semaphore(1)`; chạy engine trong **subprocess** (BacktestEngine gắn thread, và subprocess mới hủy được khi timeout); dọn job cũ; giải phóng khóa khi crash. Bản gốc dùng file khóa `O_EXCL` không bao giờ được giải phóng sau crash/timeout và timeout không dừng thread.
 - **E3 (sau khi live ổn định):** React 19, react-query 5, recharts 3, TypeScript mới; từng bước, có test.
 
+### Phase G — Runtime chiến lược paper trading (đã làm 2026-10-29)
+
+Trước đây "Start" chỉ đổi cờ trạng thái, không có gì chạy. Nay (`paper_runtime.py`, `strategy_signals.py`):
+
+- [x] Chiến lược có `instrument_id` là symbol sàn (vd `BTCUSDT`) và `interval` (mặc định `1m`) chạy trên nến đã đóng của Binance (API công khai, không key), spot long-only, khớp giả lập tại giá đóng nến trừ phí (`PAPER_FEE_RATE`, mặc định 0,1%); lần đánh giá đầu sau (re)start chỉ ghi nhớ nến, không giao dịch trên lịch sử; mỗi nến đóng chỉ đánh giá một lần.
+- [x] An toàn: runtime chỉ đọc dữ liệu công khai và ghi sổ riêng (`paper_trades`, kv `paper`); không import `order_service`/`exchange_clients`/`live_*` (có test chặn), nên không thể đặt lệnh thật ở bất kỳ chế độ nào. Lệnh vượt `PAPER_MAX_NOTIONAL` (mặc định 10000) bị từ chối và báo lỗi trên thẻ chiến lược. `PAPER_RUNTIME_ENABLED=0` tắt runtime.
+- [x] Chiến lược trên instrument giả lập (`EUR/USD.SIM`) vẫn chỉ chạy backtest; UI và API (`executes_orders`) nói rõ. `GET /api/strategies/{id}/paper` trả vị thế, P&L đã chốt và các lệnh giả lập.
+- [ ] Giới hạn đã biết: chỉ polling (mặc định 20s) nên trễ tối đa một chu kỳ; chỉ spot long-only, một vị thế mỗi chiến lược; không mô phỏng trượt giá/độ sâu sổ lệnh; chỉ báo viết lại thuần Python nên không trùng khít backtest Nautilus; không tính vị thế chưa chốt vào P&L; chưa kiểm chứng với dữ liệu thật của Binance (chỉ test với dữ liệu giả); chưa có runtime live (lệnh live vẫn đặt tay qua Orders).
+
 ### Phase F — Dọn dẹp và tài liệu
 
 - [x] Disclaimer rủi ro ở README và màn đăng nhập; bỏ "Production Ready" khỏi README. [ ] DocsPage.

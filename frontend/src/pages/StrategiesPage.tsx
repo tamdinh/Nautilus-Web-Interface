@@ -8,6 +8,15 @@ interface Strategy {
   status: string;
   description: string;
   config: Record<string, any>;
+  executes_orders?: boolean;
+  paper?: {
+    position_qty: number;
+    entry_price: number;
+    realized_pnl: number;
+    trades: number;
+    last_error: string | null;
+    last_eval_at: string | null;
+  } | null;
   performance: {
     total_pnl: number;
     total_trades: number;
@@ -138,9 +147,10 @@ export default function StrategiesPage() {
           </div>
         )}
         <div className="mb-4 bg-blue-50 border border-blue-200 text-blue-900 rounded-lg px-4 py-3 text-sm">
-          Strategies are tested in <b>Backtesting</b> on simulated data. <b>Start</b> only marks a strategy as active
-          (used by the daily-loss halt); it does <b>not</b> place paper or live orders yet. Live orders are placed
-          manually from the Orders page.
+          <b>Start</b> runs a strategy in <b>paper mode</b> (simulated fills, no real orders) when its instrument is an
+          exchange symbol such as <code>BTCUSDT</code>; it trades long-only on closed candles at the chosen interval.
+          Strategies on simulated instruments (e.g. <code>EUR/USD.SIM</code>) only run in Backtesting. Live orders are
+          always placed manually from the Orders page.
         </div>
         {/* Header */}
         <div className="flex justify-between items-center mb-8">
@@ -191,7 +201,9 @@ export default function StrategiesPage() {
                       ? 'bg-green-100 text-green-800' 
                       : 'bg-gray-100 text-gray-800'
                   }`}>
-                    {strategy.status === 'running' ? 'active (no orders)' : strategy.status}
+                    {strategy.status === 'running'
+                      ? (strategy.executes_orders ? 'paper running' : 'active (backtest only)')
+                      : strategy.status}
                   </span>
                 </div>
 
@@ -203,6 +215,25 @@ export default function StrategiesPage() {
                       .map(([k, v]) => `${k}=${v}`)
                       .join(' · ')}
                   </p>
+                )}
+
+                {strategy.status === 'running' && !strategy.executes_orders && (
+                  <p className="text-xs text-amber-700 mb-3">
+                    Not executing: set instrument_id to an exchange symbol (e.g. BTCUSDT) to paper trade.
+                  </p>
+                )}
+                {strategy.executes_orders && strategy.paper && (
+                  <div className="text-xs text-gray-600 mb-3 space-y-1">
+                    <div>
+                      Position:{' '}
+                      {strategy.paper.position_qty > 0
+                        ? `long ${strategy.paper.position_qty} @ ${strategy.paper.entry_price}`
+                        : 'flat'}
+                    </div>
+                    {strategy.paper.last_error && (
+                      <div className="text-red-600 break-words">⚠ {strategy.paper.last_error}</div>
+                    )}
+                  </div>
                 )}
 
                 {/* Performance Metrics */}

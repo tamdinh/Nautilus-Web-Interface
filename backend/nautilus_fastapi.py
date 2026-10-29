@@ -30,6 +30,7 @@ from auth_jwt import decode_token
 import admin_db_api
 import trading_control
 import ops_alerts
+import paper_runtime
 from logging_config import configure_logging, new_request_id, request_id_var
 from routers import (
     adapters,
@@ -125,10 +126,11 @@ async def lifespan(app: FastAPI):
     order_service.start()  # reconcile live orders until they reach a final state
     purge_task = asyncio.create_task(_purge_expired_tokens_loop())
     ops_alert_task = asyncio.create_task(ops_alerts.sender_loop())
+    paper_task = asyncio.create_task(paper_runtime.runtime_loop())
     yield
     # Shutdown: cancel background tasks
     await order_service.stop()
-    for task in (alert_task, purge_task, ops_alert_task):
+    for task in (alert_task, purge_task, ops_alert_task, paper_task):
         task.cancel()
         try:
             await task

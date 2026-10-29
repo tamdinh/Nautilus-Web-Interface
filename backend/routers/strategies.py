@@ -12,6 +12,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 import database
+import paper_runtime
 from auth_jwt import require_trader
 import state as _state
 
@@ -45,6 +46,7 @@ _STRATEGY_TYPES = {
             "fast_period": 10,
             "slow_period": 20,
             "trade_size": "100000",
+            "interval": "1m",
         },
     },
     "rsi": {
@@ -57,6 +59,7 @@ _STRATEGY_TYPES = {
             "oversold_level": 30.0,
             "overbought_level": 70.0,
             "trade_size": "100000",
+            "interval": "1m",
         },
     },
     "macd": {
@@ -69,6 +72,7 @@ _STRATEGY_TYPES = {
             "slow_period": 26,
             "signal_period": 9,
             "trade_size": "100000",
+            "interval": "1m",
         },
     },
 }
@@ -183,6 +187,13 @@ async def list_strategies():
     except Exception:
         pass  # Never fail the list endpoint due to risk check errors
     strategies = _nautilus().get_all_strategies()
+    db_configs = {}
+    for row in await database.list_strategies():
+        try:
+            db_configs[row["id"]] = json.loads(row.get("config") or "{}")
+        except (TypeError, ValueError):
+            pass
+    paper_states = await paper_runtime.get_states()
     result = []
     for strategy in strategies:
         br = _nautilus().get_backtest_results(strategy["id"])
@@ -204,6 +215,18 @@ async def list_strategies():
         if db_pnl != 0.0 or db_trades > 0:
             total_pnl = db_pnl
             total_trades = db_trades
+        full_cfg = db_configs.get(strategy["id"]) or _config_dict(cfg)
+        executes = paper_runtime.is_executable(full_cfg)
+        paper = paper_states.get(strategy["id"])
+        paper_summary = None
+        if executes and paper:
+            paper_summary = {k: paper[k] for k in ("position_qty", "entry_price", "realized_pnl", "trades",
+                                                   "closed_trades", "wins", "fees", "last_error", "last_eval_at",
+                                                   "last_signal")}
+            total_pnl = paper["realized_pnl"]
+            total_trades = paper["trades"]
+            br = {"win_rate": (100.0 * paper["wins"] / paper["closed_trades"]) if paper["closed_trades"] else 0.0,
+                  "total_pnl": total_pnl, "total_trades": total_trades}
         result.append(
             {
                 "id": strategy["id"],
@@ -212,8 +235,9 @@ async def list_strategies():
                 "status": strategy["status"],
                 "description": strategy.get("description", ""),
                 "instrument": instrument,
-                "config": _config_dict(cfg),
-                "executes_orders": False,
+                "config": full_cfg,
+                "executes_orders": executes,
+                "paper": paper_summary,
                 "performance": {
                     "total_pnl": total_pnl,
                     "total_trades": total_trades,
@@ -317,7 +341,32 @@ async def delete_strategy(strategy_id: str, _user: dict = Depends(require_trader
     if hasattr(sys, "strategies") and isinstance(sys.strategies, dict) and strategy_id in sys.strategies:
         del sys.strategies[strategy_id]
     await database.delete_strategy(strategy_id)
+    await paper_runtime.delete_state(strategy_id)
     return {"success": True, "message": f"Strategy {strategy_id} deleted"}
+
+
+async def _stored_config(strategy_id: str) -> Dict[str, Any]:
+    for row in await database.list_strategies():
+        if row["id"] == strategy_id:
+            try:
+                return json.loads(row.get("config") or "{}")
+            except (TypeError, ValueError):
+                return {}
+    return {}
+
+
+@router.get("/strategies/{strategy_id}/paper")
+async def get_paper_state(strategy_id: str, limit: int = 50):
+    """Paper-trading state (simulated position, realized P&L) and recent simulated trades."""
+    if not await _strategy_exists(strategy_id):
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    cfg = await _stored_config(strategy_id)
+    return {
+        "strategy_id": strategy_id,
+        "executes_orders": paper_runtime.is_executable(cfg),
+        "state": await paper_runtime.get_state(strategy_id),
+        "trades": await paper_runtime.list_trades(strategy_id, max(1, min(limit, 500))),
+    }
 
 
 async def _strategy_exists(strategy_id: str) -> bool:
@@ -337,10 +386,19 @@ async def start_strategy(strategy_id: str, _user: dict = Depends(require_trader)
         raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
     _nautilus().start_strategy(strategy_id)
     await database.update_strategy_status(strategy_id, "running")
+    cfg = await _stored_config(strategy_id)
+    executes = paper_runtime.is_executable(cfg)
+    if executes:
+        await paper_runtime.reseed(strategy_id)
     return {
         "success": True,
-        "message": f"Strategy {strategy_id} marked active. It does not place orders: strategies only run in backtests.",
-        "executes_orders": False,
+        "message": (f"Strategy {strategy_id} is running in paper mode on {cfg['instrument_id']} "
+                    f"({cfg.get('interval', '1m')} candles). No real orders are placed."
+                    if executes else
+                    f"Strategy {strategy_id} marked active, but it only runs in backtests: set instrument_id to an "
+                    "exchange symbol such as BTCUSDT to paper trade it."),
+        "executes_orders": executes,
+        "paper_only": True,
     }
 
 
