@@ -5,6 +5,7 @@ This file wires the FastAPI app together; business logic lives in routers/.
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import sys
@@ -291,6 +292,27 @@ async def jwt_middleware(request: Request, call_next):
 async def _count_requests(request: Request, call_next):
     system.increment_request_counter()
     return await call_next(request)
+
+
+@app.middleware("http")
+async def audit_middleware(request: Request, call_next):
+    """Audit trail for every state-changing API call by an authenticated user (safety net on top of
+    the explicit, richer entries written by the critical paths)."""
+    response = await call_next(request)
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.url.path.startswith("/api/"):
+        user = getattr(request.state, "user", None)
+        if user:  # unauthenticated calls were already rejected (401) and carry no identity
+            try:
+                await database.log_action(
+                    action=f"http:{request.method} {request.url.path}",
+                    user_id=str(user.get("sub", "")),
+                    resource="http",
+                    details=f"status={response.status_code} request_id={request_id_var.get()}",
+                    ip_address=request.client.host if request.client else "",
+                )
+            except Exception:  # noqa: BLE001 - auditing must never break the request
+                logging.getLogger(__name__).exception("audit log write failed")
+    return response
 
 
 @app.middleware("http")

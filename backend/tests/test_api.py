@@ -782,3 +782,11 @@ def test_request_id_echoed_and_generated(client):
     assert client.get("/health", headers={"X-Request-ID": "abc-123"}).headers["x-request-id"] == "abc-123"
     gen = client.get("/health", headers={"X-Request-ID": "bad id!!"}).headers["x-request-id"]
     assert gen != "bad id!!" and len(gen) == 32
+
+
+def test_mutations_are_audited(client):
+    r = client.post("/api/trading/kill", json={"reason": "audit test", "cancel_open": False})
+    assert r.status_code == 200
+    logs = client.get("/api/admin/audit-logs?limit=500").json()
+    entries = logs.get("logs") or logs.get("entries") or logs
+    assert any("http:POST /api/trading/kill" in str(e) for e in entries)
