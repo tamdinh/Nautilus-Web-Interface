@@ -14,7 +14,8 @@ from typing import Optional
 import bcrypt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ def decode_token(token: str) -> Optional[dict]:
     """Decode and verify a JWT token. Returns payload dict or None."""
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except PyJWTError:
         return None
 
 

@@ -1,14 +1,22 @@
+# Virtualenvs (the dev venvs here are ~700 MB each)
+.venv*/
+venv/
+env/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.git/
+.github/
+# Secrets and local state never go into the image
 .env
 .env.*
 data/
 *.db
 *.db-shm
 *.db-wal
-.pytest_cache/
+# Not needed at runtime (requirements.lock IS needed and is not ignored)
 tests/
-.git/
+requirements-dev.*
 *.md

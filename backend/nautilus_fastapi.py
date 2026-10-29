@@ -27,6 +27,7 @@ from auth import ApiKeyMiddleware
 import auth_jwt as _auth_module_jwt
 from auth_jwt import decode_token
 import admin_db_api
+import trading_control
 from routers import (
     adapters,
     alerts,
@@ -41,10 +42,12 @@ from routers import (
     strategies,
     system,
     users,
+    trading,
 )
 from routers.strategies import load_strategies_from_db
 from routers.components import load_component_states
-from state import manager, nautilus_system
+from state import manager, nautilus_system, live_manager
+from order_service import order_service
 from alert_monitor import run_alert_monitor
 
 
@@ -109,14 +112,18 @@ async def lifespan(app: FastAPI):
     # Initialise the SQLite schema + seed defaults
     await database.init_db()
     admin_db_api._init_db()
+    await trading_control.reset_on_startup()  # always come up disarmed
     # Restore persisted strategies and component states
     await load_strategies_from_db()
     await load_component_states()
     # Start background tasks
     alert_task = asyncio.create_task(run_alert_monitor())
+    await live_manager.restore_connections()
+    order_service.start()  # reconcile live orders until they reach a final state
     purge_task = asyncio.create_task(_purge_expired_tokens_loop())
     yield
     # Shutdown: cancel background tasks
+    await order_service.stop()
     for task in (alert_task, purge_task):
         task.cancel()
         try:
@@ -176,6 +183,8 @@ def _check_rate_limit(counters: dict, key: str, limit: int, now: float) -> tuple
 async def rate_limit_middleware(request: Request, call_next):
     client_ip = (request.client.host if request.client else "unknown") or "unknown"
     now = time.time()
+    if request.url.path == "/api/trading/kill":
+        return await call_next(request)   # stopping trading is never rate limited
 
     # Tight limit on login endpoint
     if request.url.path == "/api/auth/login":
@@ -298,6 +307,7 @@ app.include_router(adapters.router)
 app.include_router(database_ops.router)
 app.include_router(components.router)
 app.include_router(users.router)
+app.include_router(trading.router)
 app.include_router(admin_db_api.router, tags=["admin"])
 
 

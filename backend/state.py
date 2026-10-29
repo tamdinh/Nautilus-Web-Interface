@@ -9,8 +9,9 @@ from typing import List
 from fastapi import WebSocket
 
 backend_dir = Path(__file__).parent
-catalog_path = str(backend_dir.parent / "nautilus_data" / "catalog")
-os.environ.setdefault("NAUTILUS_CATALOG_PATH", catalog_path)
+# Historical-data catalog: NAUTILUS_CATALOG_PATH (e.g. a mounted volume), else backend/data/catalog.
+catalog_path = os.getenv("NAUTILUS_CATALOG_PATH") or str(backend_dir / "data" / "catalog")
+os.environ["NAUTILUS_CATALOG_PATH"] = catalog_path
 
 from nautilus_core import NautilusTradingSystem  # noqa: E402
 

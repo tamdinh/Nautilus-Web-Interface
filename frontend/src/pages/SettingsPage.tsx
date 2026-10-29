@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useNotification } from "@/contexts/NotificationContext";
 import api from "@/lib/api";
+import { QRCodeSVG } from "qrcode.react";
 
 // ── 2FA Management component ─────────────────────────────────────────────────
 
@@ -101,15 +102,10 @@ function TwoFactorCard() {
               <div className="font-mono text-sm bg-white border rounded px-3 py-2 break-all select-all mb-3">
                 {setupData.secret}
               </div>
-              {/* QR code via Google Charts API — data URI approach */}
-              <img
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(setupData.otpauth_uri)}`}
-                alt="TOTP QR code"
-                className="rounded border"
-                width={160}
-                height={160}
-                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-              />
+              {/* Rendered locally: the otpauth URI contains the TOTP secret and must never leave the browser */}
+              <div className="inline-block rounded border bg-white p-2">
+                <QRCodeSVG value={setupData.otpauth_uri} size={160} aria-label="TOTP QR code" />
+              </div>
             </div>
             <div>
               <p className="text-sm font-semibold mb-2">Step 2 — Enter the 6-digit code to confirm</p>

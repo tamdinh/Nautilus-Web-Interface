@@ -240,19 +240,26 @@ async def connect_adapter(adapter_id: str, req: AdapterConnectRequest, _admin: d
 
         import json
         extra = {"connection_id": connection_id} if connection_id else {}
+        # Only a connection the exchange actually verified is "connected"; an unreachable exchange
+        # leaves it "connected_offline", which can never carry live orders.
+        verified = adapter_id not in ("binance", "binance_futures", "bybit") or bool(result.get("verified"))
+        status = "connected" if verified else "connected_offline"
         await database.upsert_adapter_config(
             adapter_id=adapter_id,
-            status="connected",
+            status=status,
             api_key=encrypted_key,
             api_secret=encrypted_secret,
             extra_config=extra,
         )
+        await database.log_action(action="adapter_connected", user_id=_admin.get("sub", ""),
+                                  resource=f"adapter:{adapter_id}", details=f"status={status}")
         return {
             "success": True,
             "adapter_id": adapter_id,
-            "status": "connected",
+            "status": status,
             "connection_id": connection_id,
-            "message": f"Adapter '{meta['name']}' connected.",
+            "message": (f"Adapter '{meta['name']}' connected." if verified else
+                        f"Adapter '{meta['name']}' saved but the exchange could not be reached to verify the credentials."),
             "last_connected": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as exc:
@@ -270,6 +277,19 @@ async def disconnect_adapter(adapter_id: str, _admin: dict = Depends(require_adm
     if adapter_id not in _ADAPTER_BY_ID:
         raise HTTPException(status_code=404, detail=f"Adapter '{adapter_id}' not found")
 
+    # Refuse while live orders are still open on this venue: without a connection (and credentials)
+    # they could neither be reconciled nor cancelled.
+    venue = live_manager._VENUE_OF_ADAPTER.get(adapter_id)
+    if venue:
+        import order_store
+        open_orders = [o for o in await order_store.list_open_live() if o.get("venue") == venue]
+        if open_orders:
+            raise HTTPException(status_code=409, detail={
+                "error": "open_orders",
+                "message": f"{len(open_orders)} live order(s) are still open on {venue}. "
+                           "Cancel them (or use the kill switch) and wait until they are closed before disconnecting.",
+                "order_ids": [o["id"] for o in open_orders][:20]})
+
     # Disconnect from live trading manager
     await live_manager.disconnect(adapter_id)
 
@@ -277,6 +297,8 @@ async def disconnect_adapter(adapter_id: str, _admin: dict = Depends(require_adm
         adapter_id=adapter_id,
         status="disconnected",
     )
+    await database.log_action(action="adapter_disconnected", user_id=_admin.get("sub", ""),
+                              resource=f"adapter:{adapter_id}")
 
     return {
         "success": True,

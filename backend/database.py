@@ -12,7 +12,40 @@ from typing import Any, Dict, List, Optional
 
 import aiosqlite
 
-DB_PATH = Path(__file__).parent / "data" / "nautilus.db"
+# NAUTILUS_DB_PATH lets deployments/tests point the main database elsewhere (e.g. a mounted volume).
+DB_PATH = Path(os.getenv("NAUTILUS_DB_PATH") or Path(__file__).parent / "data" / "nautilus.db")
+
+_BUSY_TIMEOUT_MS = 5000
+
+
+class _Connect:
+    """
+    Async context manager returning an aiosqlite connection with production pragmas.
+
+    DB_PATH is read at call time (tests monkeypatch it). busy_timeout makes concurrent writers
+    wait instead of failing immediately with "database is locked". WAL (set once in init_db)
+    lets readers proceed while a writer is active.
+    """
+
+    def __init__(self) -> None:
+        self._conn: Optional[aiosqlite.Connection] = None
+
+    async def __aenter__(self) -> aiosqlite.Connection:
+        self._conn = await aiosqlite.connect(DB_PATH)
+        await self._conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        # With WAL, NORMAL is the recommended setting: no corruption risk, and a power loss can only
+        # drop the most recent commit(s). FULL fsyncs every commit (very slow on some disks).
+        await self._conn.execute("PRAGMA synchronous=NORMAL")
+        return self._conn
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+
+
+def connect() -> _Connect:
+    """Open the main database: `async with database.connect() as db:`."""
+    return _Connect()
 
 # ── Default values ────────────────────────────────────────────────────────────
 
@@ -60,6 +93,9 @@ async def init_db() -> None:
     """Create all tables if they don't exist and seed defaults."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS orders (
@@ -191,6 +227,10 @@ async def init_db() -> None:
             except aiosqlite.OperationalError:
                 pass  # Column already exists — expected on re-initialization
 
+        # Order lifecycle columns, order_events table, unique indexes
+        from order_store import migrate as _migrate_orders
+        await _migrate_orders(db)
+
         await _seed_defaults(db)
 
     # Seed admin user outside the schema transaction (needs own connection)
@@ -225,7 +265,7 @@ async def _seed_defaults(db: aiosqlite.Connection) -> None:
 # ── Orders ────────────────────────────────────────────────────────────────────
 
 async def list_orders() -> List[Dict[str, Any]]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM orders ORDER BY timestamp DESC LIMIT 200") as cur:
             rows = await cur.fetchall()
@@ -250,7 +290,7 @@ async def create_order(
         "filled_qty": 0.0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         await db.execute(
             """
             INSERT INTO orders (id, instrument, side, type, quantity, price, status, filled_qty, timestamp)
@@ -263,7 +303,7 @@ async def create_order(
 
 
 async def cancel_order(order_id: str) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "UPDATE orders SET status='CANCELLED' WHERE id=? AND status='PENDING'",
             (order_id,),
@@ -275,7 +315,7 @@ async def cancel_order(order_id: str) -> bool:
 # ── Alerts ────────────────────────────────────────────────────────────────────
 
 async def list_alerts() -> List[Dict[str, Any]]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM alerts ORDER BY created_at DESC") as cur:
             rows = await cur.fetchall()
@@ -298,7 +338,7 @@ async def create_alert(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "triggered_at": None,
     }
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         await db.execute(
             """
             INSERT INTO alerts (id, symbol, condition, price, message, status, created_at, triggered_at)
@@ -312,7 +352,7 @@ async def create_alert(
 
 async def list_active_alerts() -> List[Dict[str, Any]]:
     """Return only alerts with status='active' (not yet triggered)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM alerts WHERE status='active' ORDER BY created_at DESC"
@@ -324,7 +364,7 @@ async def list_active_alerts() -> List[Dict[str, Any]]:
 async def trigger_alert(alert_id: str) -> bool:
     """Mark alert as triggered with current timestamp. Returns True if updated."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "UPDATE alerts SET status='triggered', triggered_at=? WHERE id=? AND status='active'",
             (now, alert_id),
@@ -347,7 +387,7 @@ async def trigger_alert(alert_id: str) -> bool:
 
 async def dismiss_alert(alert_id: str) -> bool:
     """Mark alert as dismissed (active → dismissed only). Returns True if updated."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "UPDATE alerts SET status='dismissed' WHERE id=? AND status='active'",
             (alert_id,),
@@ -357,7 +397,7 @@ async def dismiss_alert(alert_id: str) -> bool:
 
 
 async def delete_alert(alert_id: str) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute("DELETE FROM alerts WHERE id=?", (alert_id,))
         await db.commit()
         return cur.rowcount > 0
@@ -366,7 +406,7 @@ async def delete_alert(alert_id: str) -> bool:
 # ── Risk limits ───────────────────────────────────────────────────────────────
 
 async def get_risk_limits() -> Dict[str, Any]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT value FROM kv_store WHERE namespace='risk' AND key='limits'"
         ) as cur:
@@ -381,7 +421,7 @@ async def get_risk_limits() -> Dict[str, Any]:
 
 async def risk_limits_explicitly_set() -> bool:
     """Return True if risk limits have been explicitly configured by the user (not just seeded defaults)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT 1 FROM kv_store WHERE namespace='risk' AND key='user_configured'"
         ) as cur:
@@ -391,8 +431,10 @@ async def risk_limits_explicitly_set() -> bool:
 
 async def update_risk_limits(updates: Dict[str, Any]) -> Dict[str, Any]:
     limits = await get_risk_limits()
+    if not updates:
+        return limits  # nothing saved: must not mark the seeded defaults as admin-reviewed
     limits.update(updates)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         await db.execute(
             "INSERT OR REPLACE INTO kv_store (namespace, key, value) VALUES ('risk', 'limits', ?)",
             (json.dumps(limits),),
@@ -442,7 +484,7 @@ def _mask_sensitive_settings(notif: dict) -> dict:
 
 
 async def get_settings(mask_sensitive: bool = True) -> Dict[str, Any]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT key, value FROM kv_store WHERE namespace='settings'"
         ) as cur:
@@ -457,7 +499,7 @@ async def get_settings(mask_sensitive: bool = True) -> Dict[str, Any]:
 
 async def get_settings_raw() -> Dict[str, Any]:
     """Return settings with decrypted sensitive fields (for internal notification use)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT key, value FROM kv_store WHERE namespace='settings'"
         ) as cur:
@@ -484,7 +526,7 @@ async def update_settings(body: Dict[str, Any]) -> Dict[str, Any]:
     # Encrypt sensitive notification fields before storing
     if "notifications" in settings:
         settings["notifications"] = _encrypt_sensitive_settings(settings["notifications"])
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         for section, values in settings.items():
             await db.execute(
                 "INSERT OR REPLACE INTO kv_store (namespace, key, value) VALUES ('settings', ?, ?)",
@@ -501,7 +543,7 @@ async def update_settings(body: Dict[str, Any]) -> Dict[str, Any]:
 # ── Strategies ────────────────────────────────────────────────────────────────
 
 async def list_strategies() -> List[Dict[str, Any]]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM strategies ORDER BY created_at DESC") as cur:
             rows = await cur.fetchall()
@@ -510,7 +552,7 @@ async def list_strategies() -> List[Dict[str, Any]]:
 
 async def save_strategy(strategy: Dict[str, Any]) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         await db.execute(
             """
             INSERT OR REPLACE INTO strategies
@@ -532,7 +574,7 @@ async def save_strategy(strategy: Dict[str, Any]) -> None:
 
 
 async def update_strategy_status(strategy_id: str, status: str) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "UPDATE strategies SET status = ?, updated_at = ? WHERE id = ?",
             (status, datetime.now(timezone.utc).isoformat(), strategy_id),
@@ -542,7 +584,7 @@ async def update_strategy_status(strategy_id: str, status: str) -> bool:
 
 
 async def delete_strategy(strategy_id: str) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute("DELETE FROM strategies WHERE id = ?", (strategy_id,))
         await db.commit()
         return cur.rowcount > 0
@@ -551,7 +593,7 @@ async def delete_strategy(strategy_id: str) -> bool:
 # ── Positions ─────────────────────────────────────────────────────────────────
 
 async def list_db_positions(open_only: bool = True) -> List[Dict[str, Any]]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         query = "SELECT * FROM positions"
         if open_only:
@@ -565,7 +607,7 @@ async def list_db_positions(open_only: bool = True) -> List[Dict[str, Any]]:
 async def save_positions(positions: List[Dict[str, Any]], strategy_id: str = "") -> None:
     """Upsert a list of position dicts (from backtest results) into DB."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         for p in positions:
             await db.execute(
                 """
@@ -591,9 +633,30 @@ async def save_positions(positions: List[Dict[str, Any]], strategy_id: str = "")
         await db.commit()
 
 
+async def replace_live_positions(venue: str, positions: List[Dict[str, Any]]) -> None:
+    """
+    Replace the stored snapshot of exchange-synced positions for one venue.
+
+    Each sync used to INSERT new random-id rows, so repeated syncs piled up duplicate "open"
+    positions. Rows are now keyed LIVE-<venue>-<instrument> and tagged strategy_id='live:<venue>'.
+    """
+    tag = f"live:{venue}"
+    now = datetime.now(timezone.utc).isoformat()
+    async with connect() as db:
+        await db.execute("DELETE FROM positions WHERE strategy_id = ?", (tag,))
+        for p in positions:
+            await db.execute(
+                """INSERT OR REPLACE INTO positions
+                   (id, instrument, side, quantity, entry_price, exit_price, pnl, is_open, strategy_id, opened_at, closed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)""",
+                (f"LIVE-{venue}-{p['instrument']}", p["instrument"], p.get("side", "LONG"),
+                 float(p.get("quantity", 0)), p.get("entry_price"), None, float(p.get("pnl", 0)), tag, now))
+        await db.commit()
+
+
 async def close_db_position(position_id: str) -> bool:
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "UPDATE positions SET is_open = 0, closed_at = ? WHERE id = ?",
             (now, position_id),
@@ -605,7 +668,7 @@ async def close_db_position(position_id: str) -> bool:
 # ── Adapter configs ───────────────────────────────────────────────────────────
 
 async def get_adapter_config(adapter_id: str) -> Optional[Dict[str, Any]]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM adapter_configs WHERE adapter_id = ?", (adapter_id,)
@@ -623,15 +686,15 @@ async def upsert_adapter_config(
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     last_connected = now if status == "connected" else None
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         await db.execute(
             """
             INSERT INTO adapter_configs
                 (adapter_id, api_key, api_secret, status, last_connected, extra_config, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(adapter_id) DO UPDATE SET
-                api_key        = excluded.api_key,
-                api_secret     = excluded.api_secret,
+                api_key        = COALESCE(excluded.api_key, adapter_configs.api_key),
+                api_secret     = COALESCE(excluded.api_secret, adapter_configs.api_secret),
                 status         = excluded.status,
                 last_connected = COALESCE(excluded.last_connected, last_connected),
                 extra_config   = excluded.extra_config,
@@ -653,7 +716,7 @@ async def upsert_adapter_config(
 # ── Component states ──────────────────────────────────────────────────────────
 
 async def get_component_states() -> Dict[str, str]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         async with db.execute("SELECT component_id, status FROM component_states") as cur:
             rows = await cur.fetchall()
     return {row[0]: row[1] for row in rows}
@@ -661,7 +724,7 @@ async def get_component_states() -> Dict[str, str]:
 
 async def set_component_state(component_id: str, status: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         await db.execute(
             """
             INSERT INTO component_states (component_id, status, updated_at)
@@ -679,7 +742,7 @@ async def set_component_state(component_id: str, status: str) -> None:
 
 async def _execute(sql: str, params: tuple = (), *, commit: bool = False) -> None:
     """Execute a raw SQL statement. Used by tests to inject test data."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         await db.execute(sql, params)
         if commit:
             await db.commit()
@@ -687,7 +750,7 @@ async def _execute(sql: str, params: tuple = (), *, commit: bool = False) -> Non
 
 async def _get_alert_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
     """Fetch a single alert by ID."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)) as cur:
             row = await cur.fetchone()
@@ -698,7 +761,7 @@ async def _get_alert_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
 
 async def has_connected_adapter() -> bool:
     """Return True if any adapter in DB has status='connected'."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT COUNT(*) FROM adapter_configs WHERE status='connected'"
         ) as cur:
@@ -715,10 +778,10 @@ async def get_daily_realized_loss() -> float:
     """
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).date().isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         async with db.execute(
             """SELECT COALESCE(SUM(pnl), 0) FROM orders
-               WHERE status='filled' AND date(timestamp)=? AND pnl < 0""",
+               WHERE UPPER(status)='FILLED' AND date(timestamp)=? AND pnl < 0""",
             (today,),
         ) as cur:
             row = await cur.fetchone()
@@ -729,7 +792,7 @@ async def count_orders_today() -> int:
     """Return the number of orders created today (UTC)."""
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).date().isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT COUNT(*) FROM orders WHERE date(timestamp)=?",
             (today,),
@@ -742,7 +805,7 @@ async def count_orders_today() -> int:
 
 async def get_user(username: str) -> Optional[Dict[str, Any]]:
     """Fetch a user by username (active only)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM users WHERE username=? AND is_active=1", (username,)
@@ -753,7 +816,7 @@ async def get_user(username: str) -> Optional[Dict[str, Any]]:
 
 async def list_users() -> List[Dict[str, Any]]:
     """Return all users (hashed_password excluded)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, username, role, is_active, created_at FROM users ORDER BY created_at"
@@ -766,7 +829,7 @@ async def create_user(username: str, hashed_password: str, role: str = "trader")
     """Insert a new user; raises ValueError if username already exists."""
     user_id = f"USR-{uuid.uuid4().hex[:8].upper()}"
     created_at = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         try:
             await db.execute(
                 """INSERT INTO users (id, username, hashed_password, role, is_active, created_at)
@@ -781,7 +844,7 @@ async def create_user(username: str, hashed_password: str, role: str = "trader")
 
 async def delete_user(user_id: str) -> bool:
     """Soft-delete a user (set is_active=0). Returns True if found."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "UPDATE users SET is_active=0 WHERE id=? AND is_active=1", (user_id,)
         )
@@ -791,7 +854,7 @@ async def delete_user(user_id: str) -> bool:
 
 async def update_user_password(user_id: str, hashed_password: str) -> bool:
     """Update a user's hashed password. Returns True if found."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "UPDATE users SET hashed_password=? WHERE id=? AND is_active=1",
             (hashed_password, user_id),
@@ -814,29 +877,51 @@ async def seed_admin_user(admin_password: str) -> None:
 
 async def get_user_2fa(username: str) -> Optional[Dict[str, Any]]:
     """Return totp_secret + two_factor_enabled for a user (active only)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, username, totp_secret, two_factor_enabled FROM users WHERE username=? AND is_active=1",
             (username,),
         ) as cur:
             row = await cur.fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    result = dict(row)
+    result["totp_secret"] = _unseal_totp(result.get("totp_secret"))
+    return result
+
+
+_TOTP_PREFIX = "enc:"
+
+
+def _seal_totp(secret: str) -> str:
+    """Encrypt a TOTP secret at rest (Fernet, same key as stored exchange credentials)."""
+    from credential_utils import encrypt_credential, has_persistent_key
+    if not has_persistent_key():
+        return secret  # development without ENCRYPTION_KEY: a throw-away key would lock users out on restart
+    return _TOTP_PREFIX + encrypt_credential(secret)
+
+
+def _unseal_totp(stored: Optional[str]) -> Optional[str]:
+    if stored and stored.startswith(_TOTP_PREFIX):
+        from credential_utils import decrypt_credential
+        return decrypt_credential(stored[len(_TOTP_PREFIX):]) or None
+    return stored  # legacy plaintext row (or None)
 
 
 async def set_totp_secret(username: str, secret: str) -> None:
-    """Store a new (unconfirmed) TOTP secret for a user."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    """Store a new (unconfirmed) TOTP secret for a user (encrypted at rest)."""
+    async with connect() as db:
         await db.execute(
             "UPDATE users SET totp_secret=? WHERE username=? AND is_active=1",
-            (secret, username),
+            (_seal_totp(secret), username),
         )
         await db.commit()
 
 
 async def enable_2fa(username: str) -> bool:
     """Activate 2FA for a user (secret must already be set). Returns True if found."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "UPDATE users SET two_factor_enabled=1 WHERE username=? AND is_active=1 AND totp_secret IS NOT NULL",
             (username,),
@@ -847,7 +932,7 @@ async def enable_2fa(username: str) -> bool:
 
 async def disable_2fa(username: str) -> bool:
     """Deactivate 2FA and clear secret. Returns True if found."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "UPDATE users SET two_factor_enabled=0, totp_secret=NULL WHERE username=? AND is_active=1",
             (username,),
@@ -876,7 +961,7 @@ async def log_action(
         "ip_address": ip_address,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         await db.execute(
             """INSERT INTO audit_logs (id, user_id, action, resource, details, ip_address, timestamp)
                VALUES (:id, :user_id, :action, :resource, :details, :ip_address, :timestamp)""",
@@ -902,7 +987,7 @@ async def get_audit_logs(
         params.append(action)
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params += [limit, offset]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT * FROM audit_logs {where} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
@@ -917,7 +1002,7 @@ async def get_audit_logs(
 async def revoke_token(jti: str, expires_at: str) -> None:
     """Persist a revoked JWT JTI so it stays invalid across restarts."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         await db.execute(
             "INSERT OR IGNORE INTO revoked_tokens (jti, revoked_at, expires_at) VALUES (?, ?, ?)",
             (jti, now, expires_at),
@@ -927,7 +1012,7 @@ async def revoke_token(jti: str, expires_at: str) -> None:
 
 async def is_token_revoked(jti: str) -> bool:
     """Return True if the JTI has been revoked and has not yet expired."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT 1 FROM revoked_tokens WHERE jti=? AND expires_at > ?",
             (jti, datetime.now(timezone.utc).isoformat()),
@@ -937,7 +1022,7 @@ async def is_token_revoked(jti: str) -> bool:
 
 async def purge_expired_revoked_tokens() -> int:
     """Delete expired tokens from the blacklist. Returns count removed."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect() as db:
         cur = await db.execute(
             "DELETE FROM revoked_tokens WHERE expires_at <= ?",
             (datetime.now(timezone.utc).isoformat(),),

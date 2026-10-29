@@ -55,7 +55,5 @@ class BinanceAdapter:
         return {"USDT": {"free": 10000.0, "locked": 0.0}}
 
     async def submit_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
-        """Submit an order to Binance."""
-        from live_trading import LiveTradingManager
-        mgr = LiveTradingManager()
-        return await mgr.submit_order(order)
+        """Orders are placed through POST /api/orders (order_service): mode, arm, risk and kill gates."""
+        raise NotImplementedError("use POST /api/orders; adapters no longer place orders directly")

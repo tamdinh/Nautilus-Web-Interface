@@ -32,7 +32,7 @@ async def health_check():
 
     # 1. SQLite database reachable?
     try:
-        async with database.aiosqlite.connect(database.DB_PATH) as db:
+        async with database.connect() as db:
             await db.execute("SELECT 1")
         checks["database"] = "ok"
     except Exception as exc:
@@ -77,9 +77,12 @@ async def get_engine_info():
     info = nautilus_system.get_system_info()
     live_status = live_manager.get_status()
 
-    # Check live mode: live_manager OR any DB adapter is connected
+    # An adapter being connected does NOT mean live trading: that is the explicit trading mode.
+    import trading_control
+    trading = await trading_control.get_state()
     db_connected = await database.has_connected_adapter()
-    is_live = live_status["is_active"] or db_connected
+    node_active = bool(live_manager.ready_venues()) or db_connected
+    is_live = trading["mode"] == "live"
 
     return {
         "trader_id": info["trader_id"],
@@ -91,8 +94,10 @@ async def get_engine_info():
         "is_initialized": info["is_initialized"],
         "catalog_path": info["catalog_path"],
         "uptime": "active",
-        "live_node_active": is_live,
+        "live_node_active": node_active,
         "live_connections": live_status["connections"],
+        "trading_mode": trading["mode"],
+        "trading_enabled": trading["trading_enabled"],
     }
 
 

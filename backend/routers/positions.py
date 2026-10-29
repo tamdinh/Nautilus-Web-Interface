@@ -11,11 +11,14 @@ import asyncio
 import logging
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends
+from decimal import Decimal
+
+from fastapi import APIRouter, Depends, HTTPException
 
 import database
 from auth_jwt import require_trader
 import market_data_service as svc
+from order_service import order_service
 from state import live_manager, nautilus_system
 
 logger = logging.getLogger(__name__)
@@ -93,12 +96,15 @@ async def list_positions():
 
 @router.post("/positions/sync")
 async def sync_positions(_user: dict = Depends(require_trader)):
-    """Sync open positions from the connected exchange."""
+    """Sync open positions from the connected exchange(s). Replaces the stored snapshot per venue."""
     live_positions = await live_manager.sync_positions()
 
-    # Persist synced positions to DB
-    if live_positions:
-        await database.save_positions(live_positions)
+    by_venue: Dict[str, List[Dict[str, Any]]] = {}
+    for p in live_positions:
+        by_venue.setdefault(str(p.get("exchange", "UNKNOWN")), []).append(p)
+    for venue in live_manager.ready_venues():
+        # a venue that is connected but returned nothing has no open balances: clear its snapshot
+        await database.replace_live_positions(venue, by_venue.get(venue, []))
 
     return {
         "success": True,
@@ -109,29 +115,57 @@ async def sync_positions(_user: dict = Depends(require_trader)):
 
 @router.post("/positions/{position_id}/close")
 async def close_position(position_id: str, _user: dict = Depends(require_trader)):
-    # If adapter connected, send a close order to the exchange
-    if live_manager.is_connected():
-        try:
-            # Fetch position from DB to get side/instrument
-            positions = await database.list_db_positions(open_only=False)
-            target = next((p for p in positions if p["id"] == position_id), None)
-            close_side = "SELL"
-            instrument = "UNKNOWN"
-            quantity = 0.0
-            if target:
-                instrument = target.get("instrument", "UNKNOWN")
-                quantity = float(target.get("quantity", 0))
-                pos_side = str(target.get("side", "LONG")).upper()
-                close_side = "SELL" if "LONG" in pos_side or "BUY" in pos_side else "BUY"
+    """
+    Close a position.
 
-            await live_manager.submit_order({
-                "instrument": instrument,
-                "side": close_side,
-                "type": "MARKET",
-                "quantity": quantity,
-            })
-        except Exception as exc:
-            logger.warning("Exchange close order failed: %s", exc)
+    Exchange-synced positions are closed by submitting a real MARKET order through the normal order
+    path (mode/arm check, exchange filters, risk check, client order id, audit). The position is NOT
+    marked closed here: it disappears on the next sync once the exchange balance is gone. Unknown or
+    zero-quantity positions are refused instead of guessed at.
+    """
+    positions = await database.list_db_positions(open_only=False)
+    target = next((p for p in positions if p["id"] == position_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
+
+    tag = str(target.get("strategy_id") or "")
+    if tag.startswith("live:"):
+        import time
+        import trading_control
+        if (await trading_control.get_state())["mode"] != "live":
+            raise HTTPException(status_code=409, detail={
+                "error": "not_live", "message": "Exchange positions can only be closed in live mode."})
+        venue = tag.split(":", 1)[1]
+        instrument = str(target.get("instrument") or "")
+        if not instrument or instrument.upper() == "UNKNOWN":
+            raise HTTPException(status_code=422, detail="Position has no valid instrument: refusing to close")
+        pos_side = str(target.get("side", "LONG")).upper()
+        close_side = "SELL" if ("LONG" in pos_side or "BUY" in pos_side) else "BUY"
+        if close_side != "SELL":
+            raise HTTPException(status_code=422, detail="Only long spot positions can be closed")
+        try:
+            symbol = live_manager.to_venue_symbol(instrument)
+            quote = next(q for q in ("USDT", "USDC", "FDUSD", "BUSD") if symbol.endswith(q))
+            # sell what the exchange says is free right now (locked funds and dust are not sellable)
+            quantity = await live_manager.free_balance(venue, symbol[: -len(quote)])
+        except (StopIteration, ValueError):
+            raise HTTPException(status_code=422, detail="Cannot derive the asset to sell from this instrument")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=f"cannot read the {venue} balance: {exc}")
+        if quantity <= 0:
+            raise HTTPException(status_code=422, detail="No free balance to close")
+        # Double clicks within 30s resolve to one order (same key + same payload = replay)
+        key = f"close-{position_id}-{int(time.time() // 30)}"
+        result = await order_service.place(
+            user=_user.get("sub", ""),
+            order={"instrument": instrument, "side": close_side, "type": "MARKET", "quantity": quantity,
+                   "price": None, "leverage": 1.0, "venue": venue, "floor_quantity": True},
+            idempotency_key=key[:64])
+        await database.log_action(action="position_close_requested", user_id=_user.get("sub", ""),
+                                  resource=f"position:{position_id}",
+                                  details=f"order={result.get('order', {}).get('id')}")
+        return {"success": True, "closed_in_db": False, "order": result.get("order"),
+                "message": f"Close order submitted for {position_id}; position clears on next sync"}
 
     closed = await database.close_db_position(position_id)
     return {"success": True, "closed_in_db": closed, "message": f"Position {position_id} closed"}

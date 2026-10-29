@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from decimal import Decimal
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -67,16 +69,16 @@ class TestLiveTradingNodeLifecycle:
     def test_live_node_status_in_engine_info(self, client):
         """After connecting adapter, engine info must show live node is active."""
         with patch("live_trading.LiveTradingManager.connect_binance", new_callable=AsyncMock) as m:
-            m.return_value = {"success": True}
+            m.return_value = {"success": True, "verified": True}
             client.post(
                 "/api/adapters/binance/connect",
                 json={"api_key": "testkey12345", "api_secret": "testsecret12345"},
             )
 
-        r = client.get("/api/engine/info")
-        body = r.json()
-        assert body.get("engine_type") == "live"
+        body = client.get("/api/engine/info").json()
         assert body.get("live_node_active") is True
+        # A connected adapter is not live trading: the explicit trading mode decides
+        assert body.get("engine_type") == "backtest" and body.get("trading_mode") == "paper"
 
     def test_disconnect_shuts_down_live_node(self, client):
         """Disconnecting adapter must stop the LiveTradingNode gracefully."""
@@ -171,31 +173,25 @@ class TestAdapterInterface:
 
 class TestOrderRouting:
 
-    def test_order_routed_to_exchange_when_adapter_connected(self, client):
-        """When adapter connected, new orders must be submitted to exchange."""
-        with patch("live_trading.LiveTradingManager.submit_order", new_callable=AsyncMock) as mock_submit:
-            mock_submit.return_value = {
-                "order_id": "EXCHANGE-ORD-001",
-                "status": "pending",
-                "exchange": "BINANCE",
-            }
+    def test_order_routed_to_exchange_only_in_live_mode_and_armed(self, client, fake_venue):
+        """Live+armed: the order reaches the exchange carrying our client order id."""
+        client.post("/api/risk/limits", json={"max_position_size": 50000, "max_daily_loss": 500, "max_orders_per_day": 20})
+        client.post("/api/trading/mode", json={"mode": "live"})
+        client.post("/api/trading/arm", json={})
+        r = client.post("/api/orders", json={"instrument": "BTCUSDT", "side": "BUY", "type": "LIMIT",
+                                            "quantity": "0.5", "price": "30000"},
+                        headers={"Idempotency-Key": "live-test-0001"})
+        assert r.status_code == 200
+        assert len(fake_venue.sent) == 1
+        assert fake_venue.sent[0]["client_order_id"] == r.json()["order"]["client_order_id"]
+        assert r.json()["exchange_order_id"] == "1001"
 
-            # Simulate adapter connected
-            with patch("live_trading.LiveTradingManager.is_connected", return_value=True):
-                r = client.post(
-                    "/api/orders",
-                    json={
-                        "instrument": "BTC/USDT.BINANCE",
-                        "side": "BUY",
-                        "type": "MARKET",
-                        "quantity": 0.001,
-                    },
-                )
-
-            assert r.status_code == 200
-            mock_submit.assert_called_once()
-            body = r.json()
-            assert body.get("exchange_order_id") == "EXCHANGE-ORD-001"
+    def test_connected_adapter_alone_never_routes_orders_to_exchange(self, client, fake_venue):
+        """Paper mode (default): a connected adapter must not make an order real."""
+        r = client.post("/api/orders", json={"instrument": "BTCUSDT", "side": "BUY", "type": "MARKET",
+                                            "quantity": "0.001"})
+        assert r.status_code in (200, 400)
+        assert fake_venue.sent == []
 
     def test_order_rejected_when_no_adapter_connected(self, client):
         """Without connected adapter, live orders must be rejected with clear error."""
@@ -212,15 +208,19 @@ class TestOrderRouting:
         assert r.status_code in (400, 422)
         assert "adapter" in r.text.lower() or "connect" in r.text.lower()
 
-    def test_order_cancel_sent_to_exchange(self, client):
-        """DELETE /api/orders/{id} must cancel the order on the exchange."""
-        with patch("live_trading.LiveTradingManager.cancel_order", new_callable=AsyncMock) as mock_cancel:
-            mock_cancel.return_value = {"success": True, "exchange_order_id": "EX-ORD-123"}
-
-            with patch("live_trading.LiveTradingManager.is_connected", return_value=True):
-                r = client.delete("/api/orders/ORD-TEST-001")
-
-            mock_cancel.assert_called_once_with("ORD-TEST-001")
+    def test_order_cancel_sent_to_exchange(self, client, fake_venue):
+        """DELETE /api/orders/{id} on a live order must cancel it on the exchange."""
+        from tests.test_order_service import vo
+        client.post("/api/risk/limits", json={"max_position_size": 50000, "max_daily_loss": 500, "max_orders_per_day": 20})
+        client.post("/api/trading/mode", json={"mode": "live"})
+        client.post("/api/trading/arm", json={})
+        placed = client.post("/api/orders", json={"instrument": "BTCUSDT", "side": "BUY", "type": "LIMIT",
+                                                 "quantity": "0.5", "price": "30000"},
+                             headers={"Idempotency-Key": "live-test-0002"}).json()["order"]
+        fake_venue.fetch_behavior = lambda c: vo(c, "CANCELED")
+        r = client.delete(f"/api/orders/{placed['id']}")
+        assert r.status_code == 200
+        assert fake_venue.cancels == [placed["client_order_id"]]
 
     def test_order_status_updates_from_exchange_websocket(self, client):
         """Order status in DB must update when exchange sends fill notification via WS."""
@@ -269,20 +269,19 @@ class TestPositionSync:
             assert r.status_code == 200
             mock_sync.assert_called_once()
 
-    def test_close_position_sends_market_sell(self, client):
-        """Closing a LONG position must send a SELL market order to exchange."""
-        with patch("live_trading.LiveTradingManager.submit_order", new_callable=AsyncMock) as mock_submit:
-            mock_submit.return_value = {"success": True, "order_id": "CLOSE-ORD-001"}
-
-            with patch("live_trading.LiveTradingManager.is_connected", return_value=True):
-                r = client.post("/api/positions/POS-001/close")
-
-            assert r.status_code == 200
-            mock_submit.assert_called_once()
-            call_kwargs = mock_submit.call_args[1] or {}
-            # Closing a long must be a SELL order
-            side = call_kwargs.get("side") or (mock_submit.call_args[0][0] if mock_submit.call_args[0] else "")
-            assert "SELL" in str(side).upper()
+    def test_close_position_sends_market_sell(self, client, fake_venue):
+        """Closing a LONG exchange position must send a SELL market order through the order path."""
+        import asyncio
+        import database
+        client.post("/api/risk/limits", json={"max_position_size": 50000, "max_daily_loss": 500, "max_orders_per_day": 20})
+        client.post("/api/trading/mode", json={"mode": "live"})
+        client.post("/api/trading/arm", json={})
+        fake_venue.free = {"BTC": Decimal("0.5")}
+        asyncio.run(database.replace_live_positions("BINANCE", [{"instrument": "BTCUSDT", "side": "LONG", "quantity": 0.5}]))
+        pos = [p for p in client.get("/api/positions").json() if p["instrument"] == "BTCUSDT"][0]
+        r = client.post(f"/api/positions/{pos['id']}/close")
+        assert r.status_code == 200
+        assert len(fake_venue.sent) == 1 and fake_venue.sent[0]["side"] == "SELL"
 
 
 # ═════════════════════════════════════════════════════════════════════════════

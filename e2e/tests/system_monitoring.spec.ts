@@ -11,12 +11,12 @@
  * - Database operations
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "../helpers/auth";
 
 const API = process.env.BASE_URL ?? "http://localhost:8000";
 
 test.describe("Health & System", () => {
-  test("GET /api/health returns healthy or degraded", async ({ request }) => {
+  test("GET /api/health returns healthy or degraded", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/health`);
     expect([200, 503]).toContain(r.status());
     const body = await r.json();
@@ -24,7 +24,7 @@ test.describe("Health & System", () => {
     expect(body.version).toBeTruthy();
   });
 
-  test("GET /api/system/metrics returns cpu and memory", async ({ request }) => {
+  test("GET /api/system/metrics returns cpu and memory", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/system/metrics`);
     expect(r.status()).toBe(200);
     const body = await r.json();
@@ -33,7 +33,7 @@ test.describe("Health & System", () => {
     expect(typeof body.requests_total).toBe("number");
   });
 
-  test("GET /api/components returns 6 components", async ({ request }) => {
+  test("GET /api/components returns 6 components", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/components`);
     expect(r.status()).toBe(200);
     const body = await r.json();
@@ -43,7 +43,7 @@ test.describe("Health & System", () => {
     expect(ids).toContain("data_engine");
   });
 
-  test("component start/stop/restart actions return success", async ({ request }) => {
+  test("component start/stop/restart actions return success", async ({ authRequest: request }) => {
     for (const action of ["start", "stop", "restart"]) {
       const r = await request.post(`${API}/api/component/${action}`, {
         data: { component: "risk_engine" },
@@ -55,7 +55,7 @@ test.describe("Health & System", () => {
 });
 
 test.describe("Settings", () => {
-  test("get settings returns structured object", async ({ request }) => {
+  test("get settings returns structured object", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/settings`);
     expect(r.status()).toBe(200);
     const body = await r.json();
@@ -63,7 +63,7 @@ test.describe("Settings", () => {
     expect(body).toHaveProperty("notifications");
   });
 
-  test("save and retrieve general settings", async ({ request }) => {
+  test("save and retrieve general settings", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/settings`, {
       data: {
         general: {
@@ -82,7 +82,7 @@ test.describe("Settings", () => {
     expect(getBody.general?.system_name).toBe("E2E Test System");
   });
 
-  test("save notification settings persists", async ({ request }) => {
+  test("save notification settings persists", async ({ authRequest: request }) => {
     await request.post(`${API}/api/settings`, {
       data: {
         notifications: {
@@ -100,15 +100,16 @@ test.describe("Settings", () => {
 });
 
 test.describe("Risk Limits", () => {
-  test("get risk limits returns default values", async ({ request }) => {
+  test("get risk limits returns default values", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/risk/limits`);
     expect(r.status()).toBe(200);
     const body = await r.json();
-    expect(body.limits).toHaveProperty("max_position_size");
-    expect(body.limits).toHaveProperty("max_daily_loss");
+    // GET returns the limits object directly (POST wraps it in `limits`)
+    expect(body).toHaveProperty("max_position_size");
+    expect(body).toHaveProperty("max_daily_loss");
   });
 
-  test("update risk limits persists correctly", async ({ request }) => {
+  test("update risk limits persists correctly", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/risk/limits`, {
       data: {
         max_position_size: 123_456,
@@ -125,7 +126,7 @@ test.describe("Risk Limits", () => {
     expect(limits.max_orders_per_day).toBe(75);
   });
 
-  test("partial update keeps other limits intact", async ({ request }) => {
+  test("partial update keeps other limits intact", async ({ authRequest: request }) => {
     // First set a known state
     await request.post(`${API}/api/risk/limits`, {
       data: { max_position_size: 500_000, max_daily_loss: 10_000 },
@@ -137,14 +138,14 @@ test.describe("Risk Limits", () => {
     });
 
     const r = await request.get(`${API}/api/risk/limits`);
-    const limits = (await r.json()).limits;
+    const limits = await r.json();
     expect(limits.max_position_size).toBe(250_000);
     expect(limits.max_daily_loss).toBe(10_000); // unchanged
   });
 });
 
 test.describe("Market Data", () => {
-  test("GET /api/market-data/instruments returns BTC price", async ({ request }) => {
+  test("GET /api/market-data/instruments returns BTC price", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/market-data/instruments`);
     expect(r.status()).toBe(200);
     const body = await r.json();
@@ -156,7 +157,7 @@ test.describe("Market Data", () => {
     expect(btc.price).toBeGreaterThan(0);
   });
 
-  test("GET /api/market-data/BTCUSDT returns valid quote", async ({ request }) => {
+  test("GET /api/market-data/BTCUSDT returns valid quote", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/market-data/BTCUSDT`);
     // May be 200 (live) or fallback
     expect([200, 404]).toContain(r.status());
@@ -167,14 +168,14 @@ test.describe("Market Data", () => {
     }
   });
 
-  test("GET /api/market-data/FAKECOIN returns 404", async ({ request }) => {
+  test("GET /api/market-data/FAKECOIN returns 404", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/market-data/FAKECOIN`);
     expect(r.status()).toBe(404);
   });
 });
 
 test.describe("Database Operations", () => {
-  test("POST /api/database/backup returns success", async ({ request }) => {
+  test("POST /api/database/backup returns success", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/database/backup`, {
       data: {},
     });
@@ -182,7 +183,7 @@ test.describe("Database Operations", () => {
     expect((await r.json()).success).toBe(true);
   });
 
-  test("POST /api/database/optimize returns success", async ({ request }) => {
+  test("POST /api/database/optimize returns success", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/database/optimize`, {
       data: {},
     });
@@ -190,7 +191,7 @@ test.describe("Database Operations", () => {
     expect((await r.json()).success).toBe(true);
   });
 
-  test("GET /api/database/backups returns list", async ({ request }) => {
+  test("GET /api/database/backups returns list", async ({ authRequest: request }) => {
     // Create a backup first
     await request.post(`${API}/api/database/backup`, { data: {} });
 

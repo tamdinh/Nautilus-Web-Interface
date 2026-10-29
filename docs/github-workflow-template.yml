@@ -93,5 +93,5 @@ jobs:
 
       - name: Test backend import
         working-directory: ./backend
-        run: python -c "import nautilus_api; print('Backend imports OK')"
+        run: python -c "import nautilus_fastapi; print('Backend imports OK')"
 

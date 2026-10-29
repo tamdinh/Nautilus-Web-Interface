@@ -5,11 +5,18 @@
  */
 import { API_CONFIG } from '../config';
 
+/** Extra options for a request. */
+export interface RequestOptions {
+  headers?: Record<string, string>;
+  /** Retries on 5xx/network errors. Default: 2 for GET, 0 for anything that changes state. */
+  retries?: number;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
-    public readonly detail?: string,
+    public readonly detail?: unknown,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -32,17 +39,35 @@ function handleUnauthorized(): void {
   window.dispatchEvent(new CustomEvent('nautilus:unauthorized'));
 }
 
+/** Turn a FastAPI `detail` (string, {error,message} object, or validation list) into readable text. */
+function describeDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string' && detail) return detail;
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const d = detail as { message?: unknown; error?: unknown };
+    if (typeof d.message === 'string' && d.message) return d.message;
+    if (typeof d.error === 'string' && d.error) return d.error;
+  }
+  if (Array.isArray(detail) && detail.length) {
+    const first = detail[0] as { msg?: unknown };
+    if (typeof first?.msg === 'string') return first.msg;
+  }
+  return fallback;
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  retries = 2,
+  options: RequestOptions = {},
   timeoutMs = API_CONFIG.TIMEOUT,
 ): Promise<T> {
   const url = `${API_CONFIG.NAUTILUS_API_URL}${path}`;
+  // Never auto-retry requests that change state: a retry after a timeout/5xx can duplicate an order.
+  const retries = options.retries ?? (method === 'GET' ? 2 : 0);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...getAuthHeaders(),
+    ...(options.headers ?? {}),
   };
 
   let lastError: unknown;
@@ -65,19 +90,27 @@ async function request<T>(
         }
 
         const text = await response.text();
-        let detail: string | undefined;
+        let detail: unknown;
         try {
           detail = JSON.parse(text)?.detail;
         } catch {
           detail = text;
         }
+        const message = describeDetail(detail, `HTTP ${response.status}`);
         // 4xx errors are not retried — they indicate client errors
         if (response.status < 500) {
-          throw new ApiError(response.status, `HTTP ${response.status}`, detail);
+          throw new ApiError(response.status, message, detail);
         }
-        lastError = new ApiError(response.status, `HTTP ${response.status}`, detail);
+        lastError = new ApiError(response.status, message, detail);
       } else {
-        return response.json() as Promise<T>;
+        const data = await response.json();
+        // 202 = accepted but the outcome is not known yet (e.g. order sent, exchange did not answer).
+        // Surface it as an error so the UI never reports success or invites a blind retry.
+        if (response.status === 202 && data && typeof data === 'object' && 'detail' in data) {
+          const detail = (data as { detail: unknown }).detail;
+          throw new ApiError(202, describeDetail(detail, 'Outcome unknown — check the order list before retrying'), detail);
+        }
+        return data as T;
       }
     } catch (err) {
       if (err instanceof ApiError && err.status < 500) throw err;
@@ -96,10 +129,10 @@ async function request<T>(
 }
 
 const api = {
-  get: <T>(path: string) => request<T>('GET', path),
-  post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
-  put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
-  delete: <T>(path: string) => request<T>('DELETE', path),
+  get: <T>(path: string, options?: RequestOptions) => request<T>('GET', path, undefined, options),
+  post: <T>(path: string, body?: unknown, options?: RequestOptions) => request<T>('POST', path, body, options),
+  put: <T>(path: string, body?: unknown, options?: RequestOptions) => request<T>('PUT', path, body, options),
+  delete: <T>(path: string, options?: RequestOptions) => request<T>('DELETE', path, undefined, options),
   /** Fire-and-forget: returns null on failure instead of throwing */
   safeGet: async <T>(path: string, fallback: T): Promise<T> => {
     try {

@@ -10,6 +10,7 @@
  */
 
 import { test, expect } from "@playwright/test";
+import { ADMIN_USER, ADMIN_PASSWORD } from "../helpers/auth";
 
 const API = process.env.BASE_URL ?? "http://localhost:8000";
 
@@ -17,7 +18,7 @@ const API = process.env.BASE_URL ?? "http://localhost:8000";
 
 async function getAdminToken(request: import("@playwright/test").APIRequestContext): Promise<string> {
   const r = await request.post(`${API}/api/auth/login`, {
-    data: { username: "admin", password: "admin" },
+    data: { username: ADMIN_USER, password: ADMIN_PASSWORD },
   });
   if (r.status() !== 200) throw new Error(`Admin login failed: ${r.status()}`);
   return (await r.json()).access_token;
@@ -211,7 +212,7 @@ test.describe("Users API — Change password", () => {
 test.describe("Auth — Login", () => {
   test("login returns role field", async ({ request }) => {
     const r = await request.post(`${API}/api/auth/login`, {
-      data: { username: "admin", password: "admin" },
+      data: { username: ADMIN_USER, password: ADMIN_PASSWORD },
     });
     expect(r.status()).toBe(200);
     const body = await r.json();

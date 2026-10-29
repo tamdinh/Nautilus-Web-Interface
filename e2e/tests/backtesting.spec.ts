@@ -10,12 +10,12 @@
  * - Parameter sweep returns ranked results
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "../helpers/auth";
 
 const API = process.env.BASE_URL ?? "http://localhost:8000";
 
 test.describe("Backtesting API", () => {
-  test("demo backtest completes and returns results", async ({ request }) => {
+  test("demo backtest completes and returns results", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/nautilus/demo-backtest`, {
       data: {
         fast_period: 10,
@@ -28,23 +28,25 @@ test.describe("Backtesting API", () => {
     expect(r.status()).toBe(200);
     const body = await r.json();
     expect(body.success).toBe(true);
-    expect(typeof body.total_pnl).toBe("number");
-    expect(typeof body.total_trades).toBe("number");
-    expect(typeof body.win_rate).toBe("number");
+    // the metrics live under `result` in the current API
+    expect(typeof body.result.total_pnl).toBe("number");
+    expect(typeof body.result.total_trades).toBe("number");
+    expect(typeof body.result.win_rate).toBe("number");
+    expect(body.result.total_orders).toBeGreaterThan(0);
   });
 
-  test("demo backtest results include equity curve", async ({ request }) => {
+  test("demo backtest results include equity curve", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/nautilus/demo-backtest`, {
       data: { fast_period: 10, slow_period: 30, num_bars: 100 },
       timeout: 30_000,
     });
     const body = await r.json();
-    expect(body.equity_curve).toBeTruthy();
-    expect(Array.isArray(body.equity_curve)).toBe(true);
-    expect(body.equity_curve.length).toBeGreaterThan(0);
+    const curve = body.result.equity_curve;
+    expect(Array.isArray(curve)).toBe(true);
+    expect(curve.length).toBeGreaterThan(0);
   });
 
-  test("demo backtest with invalid periods returns 422", async ({ request }) => {
+  test("demo backtest with invalid periods returns 422", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/nautilus/demo-backtest`, {
       data: {
         fast_period: 50,
@@ -55,7 +57,7 @@ test.describe("Backtesting API", () => {
     expect(r.status()).toBe(422);
   });
 
-  test("concurrent backtest returns 409", async ({ request }) => {
+  test("concurrent backtest returns 409", async ({ authRequest: request }) => {
     // Simulate lock by checking the endpoint response when lock is set.
     // We can't easily test true concurrency in E2E, so we test via the API
     // by sending two requests and verifying at least one gets 409.
@@ -68,14 +70,14 @@ test.describe("Backtesting API", () => {
     expect([200, 409]).toContain(r.status());
   });
 
-  test("GET /api/nautilus/system-info returns engine status", async ({ request }) => {
+  test("GET /api/nautilus/system-info returns engine status", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/nautilus/system-info`);
     expect(r.status()).toBe(200);
     const body = await r.json();
     expect(body).toHaveProperty("is_initialized");
   });
 
-  test("GET /api/engine/info returns trader_id and strategy count", async ({ request }) => {
+  test("GET /api/engine/info returns trader_id and strategy count", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/engine/info`);
     expect(r.status()).toBe(200);
     const body = await r.json();
@@ -83,7 +85,7 @@ test.describe("Backtesting API", () => {
     expect(body).toHaveProperty("is_initialized");
   });
 
-  test("parameter sweep returns ranked results", async ({ request }) => {
+  test("parameter sweep returns ranked results", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/nautilus/parameter-sweep`, {
       data: {
         fast_period_min: 5,
@@ -114,7 +116,7 @@ test.describe("Backtesting API", () => {
     expect(body.best.slow_period).toBeDefined();
   });
 
-  test("parameter sweep with invalid range returns 400", async ({ request }) => {
+  test("parameter sweep with invalid range returns 400", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/nautilus/parameter-sweep`, {
       data: {
         fast_period_min: 30,

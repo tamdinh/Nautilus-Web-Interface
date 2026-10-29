@@ -2,6 +2,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -11,8 +12,9 @@ from auth_jwt import require_admin
 
 router = APIRouter(prefix="/api/database", tags=["database"])
 
-# Path to main SQLite file (same as database.py)
-_DB_PATH = database.DB_PATH
+def _db_path() -> Path:
+    """Main SQLite file, resolved at call time (database.DB_PATH may be overridden)."""
+    return Path(database.DB_PATH)
 
 
 class DatabaseOpRequest(BaseModel):
@@ -25,12 +27,13 @@ class CacheOpRequest(BaseModel):
 
 class RestoreRequest(BaseModel):
     backup_file: str  # just the filename, e.g. "nautilus_backup_20240101_120000.db"
+    totp_code: Optional[str] = None  # step-up code (restoring rewinds orders, trading state and risk limits)
 
 
 @router.post("/backup")
 async def backup_database(req: DatabaseOpRequest, _admin: dict = Depends(require_admin)):
     """Copy the SQLite database file to a timestamped backup."""
-    db_path = Path(_DB_PATH)
+    db_path = _db_path()
     if not db_path.exists():
         return {
             "success": False,
@@ -70,7 +73,7 @@ async def backup_database(req: DatabaseOpRequest, _admin: dict = Depends(require
 @router.get("/backups")
 async def list_backups():
     """List all available backup files in the data directory."""
-    db_dir = Path(_DB_PATH).parent
+    db_dir = _db_path().parent
     backups = sorted(
         [
             {
@@ -88,8 +91,11 @@ async def list_backups():
 
 @router.post("/restore")
 async def restore_database(req: RestoreRequest, _admin: dict = Depends(require_admin)):
-    """Restore the main database from a named backup file."""
-    db_dir = Path(_DB_PATH).parent
+    """Restore the main database from a named backup file (step-up protected, always ends disarmed)."""
+    import step_up
+    import trading_control
+    await step_up.verify(_admin["sub"], req.totp_code)
+    db_dir = _db_path().parent
     backup_path = db_dir / req.backup_file
 
     # Safety: only allow files in the same data directory with the expected prefix
@@ -104,7 +110,7 @@ async def restore_database(req: RestoreRequest, _admin: dict = Depends(require_a
         # Copy current DB to a safety snapshot first
         safety_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safety_path = db_dir / f"nautilus_pre_restore_{safety_ts}.db"
-        src = sqlite3.connect(str(_DB_PATH))
+        src = sqlite3.connect(str(_db_path()))
         dst = sqlite3.connect(str(safety_path))
         src.backup(dst)
         dst.close()
@@ -112,10 +118,15 @@ async def restore_database(req: RestoreRequest, _admin: dict = Depends(require_a
 
         # Restore from backup
         bak = sqlite3.connect(str(backup_path))
-        live = sqlite3.connect(str(_DB_PATH))
+        live = sqlite3.connect(str(_db_path()))
         bak.backup(live)
         live.close()
         bak.close()
+
+        # The restored database may say "armed": never resume live trading from a restored state
+        await trading_control.disarm(_admin["sub"], "database restored: re-arm required")
+        await database.log_action(action="database_restored", user_id=_admin["sub"], resource="database",
+                                  details=f"backup={req.backup_file} safety={safety_path.name}")
 
         return {
             "success": True,
@@ -130,7 +141,7 @@ async def restore_database(req: RestoreRequest, _admin: dict = Depends(require_a
 @router.post("/optimize")
 async def optimize_database(req: DatabaseOpRequest, _admin: dict = Depends(require_admin)):
     """Run VACUUM + ANALYZE to reclaim space and update query planner stats."""
-    db_path = Path(_DB_PATH)
+    db_path = _db_path()
     if not db_path.exists():
         return {"success": False, "message": "Database file not found"}
 
@@ -155,7 +166,7 @@ async def optimize_database(req: DatabaseOpRequest, _admin: dict = Depends(requi
 @router.post("/clean")
 async def clean_cache(req: CacheOpRequest, _admin: dict = Depends(require_admin)):
     """Delete triggered/cancelled records older than 30 days to reduce DB size."""
-    db_path = Path(_DB_PATH)
+    db_path = _db_path()
     if not db_path.exists():
         return {"success": False, "message": "Database file not found"}
 
@@ -167,9 +178,9 @@ async def clean_cache(req: CacheOpRequest, _admin: dict = Depends(require_admin)
             "AND created_at < datetime('now', '-30 days')"
         )
         alerts_removed = cur.rowcount
-        # Remove cancelled / filled orders
+        # Remove cancelled orders (filled orders are trade history and are kept)
         cur = conn.execute(
-            "DELETE FROM orders WHERE status IN ('CANCELLED', 'FILLED') "
+            "DELETE FROM orders WHERE status = 'CANCELLED' AND mode != 'live' "
             "AND timestamp < datetime('now', '-30 days')"
         )
         orders_removed = cur.rowcount

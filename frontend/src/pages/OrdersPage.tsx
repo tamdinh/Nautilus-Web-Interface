@@ -9,7 +9,9 @@ interface Order {
   type: 'MARKET' | 'LIMIT' | 'STOP';
   quantity: number;
   price?: number;
-  status: 'PENDING' | 'FILLED' | 'CANCELLED' | 'REJECTED';
+  status: 'PENDING' | 'PENDING_SUBMIT' | 'SUBMITTED' | 'PARTIALLY_FILLED' | 'FILLED' | 'CANCELLED' | 'REJECTED' | 'UNKNOWN';
+  mode?: 'paper' | 'live';
+  last_error?: string | null;
   filled_qty: number;
   timestamp: string;
 }
@@ -29,6 +31,10 @@ export default function OrdersPage() {
   });
   const { lastMessage } = useWebSocket();
   const prevMessageRef = useRef(lastMessage);
+  // One key per order the user is composing: a re-sent request (double click, network retry) returns
+  // the same order instead of creating a second one. Reset after the order is accepted.
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID());
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     fetchOrders();
@@ -62,13 +68,25 @@ export default function OrdersPage() {
       return;
     }
     setOrderError(null);
+    if (submitting) return;
+    setSubmitting(true);
     try {
-      await api.post('/api/orders', newOrder);
+      // Decimal values travel as strings: no binary-float rounding between the form and the exchange
+      await api.post(
+        '/api/orders',
+        { ...newOrder, quantity: String(newOrder.quantity), price: newOrder.type === 'MARKET' ? null : String(newOrder.price) },
+        { headers: { 'Idempotency-Key': idempotencyKeyRef.current } },
+      );
+      idempotencyKeyRef.current = crypto.randomUUID();
       setShowNewOrderModal(false);
       setNewOrder({ instrument: 'BTCUSDT', side: 'BUY', type: 'LIMIT', quantity: 0.001, price: 0 });
       fetchOrders();
     } catch (error) {
+      // 202 (outcome unknown) keeps the same key so an explicit re-submit cannot double the order
       setOrderError(error instanceof Error ? error.message : 'Failed to create order');
+      fetchOrders();
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -86,6 +104,10 @@ export default function OrdersPage() {
     switch (status) {
       case 'FILLED': return 'bg-green-100 text-green-800';
       case 'PENDING': return 'bg-yellow-100 text-yellow-800';
+      case 'PENDING_SUBMIT': return 'bg-yellow-100 text-yellow-800';
+      case 'SUBMITTED': return 'bg-blue-100 text-blue-800';
+      case 'PARTIALLY_FILLED': return 'bg-blue-100 text-blue-800';
+      case 'UNKNOWN': return 'bg-orange-100 text-orange-800';
       case 'CANCELLED': return 'bg-gray-100 text-gray-800';
       case 'REJECTED': return 'bg-red-100 text-red-800';
       default: return 'bg-blue-100 text-blue-800';
@@ -186,7 +208,7 @@ export default function OrdersPage() {
                         </span>
                       </td>
                       <td className="px-6 py-4 text-center">
-                        {order.status === 'PENDING' && (
+                        {['PENDING', 'SUBMITTED', 'PARTIALLY_FILLED', 'UNKNOWN'].includes(order.status) && (
                           <button
                             onClick={() => handleCancelOrder(order.id)}
                             className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition-all text-xs font-semibold"

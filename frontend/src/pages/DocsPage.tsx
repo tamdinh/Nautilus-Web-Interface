@@ -60,11 +60,8 @@ pip install nautilus_trader
 # Install FastAPI
 pip install fastapi uvicorn
 
-# Run Nautilus API server
-python nautilus_api.py
-
-# Run Admin DB API server
-python admin_db_api.py`}
+# Run the API server (includes the admin API under /api/admin)
+python nautilus_fastapi.py`}
                 </pre>
 
                 <h3>Frontend Setup</h3>

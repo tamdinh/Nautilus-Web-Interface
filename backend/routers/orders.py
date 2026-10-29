@@ -1,30 +1,44 @@
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 import database
-from auth_jwt import require_trader
-from risk_engine import risk_engine, RiskCheckError
-from state import live_manager, nautilus_system
+import order_store
+from auth_jwt import get_current_user, require_trader
+from order_service import order_service
+from state import nautilus_system
 from utils import normalize_order
 
 router = APIRouter(prefix="/api", tags=["orders"])
+
+_IDEMPOTENCY_KEY_PATTERN = r"^[A-Za-z0-9_\-:.]{8,64}$"
 
 
 class OrderCreateRequest(BaseModel):
     instrument: str = Field("EUR/USD.SIM", min_length=1, max_length=50)
     side: str = Field("BUY", pattern="^(BUY|SELL)$")
     type: str = Field("MARKET", pattern="^(MARKET|LIMIT|STOP)$")
-    quantity: float = Field(..., gt=0)
-    price: Optional[float] = Field(None, ge=0)
+    quantity: Decimal = Field(..., gt=0, max_digits=24, decimal_places=12)
+    price: Optional[Decimal] = Field(None, ge=0, max_digits=24, decimal_places=12)
     leverage: float = Field(1.0, ge=1.0, le=1000.0)
+    venue: Optional[str] = Field(None, pattern="^(?i:binance|bybit)$")
+
+
+_INTERNAL_FIELDS = ("request_hash", "user_id", "check_count")
+
+
+def _strip_internal(order: Optional[Dict[str, Any]]) -> None:
+    if order:
+        for f in _INTERNAL_FIELDS:
+            order.pop(f, None)
 
 
 @router.get("/orders")
-async def list_orders():
-    """List orders: backtest orders + persistent user-created orders."""
+async def list_orders(_user: dict = Depends(get_current_user)):
+    """List orders: backtest orders + persistent (paper and live) orders."""
     all_orders: List[Dict[str, Any]] = []
 
     for results in nautilus_system.backtest_results.values():
@@ -34,91 +48,46 @@ async def list_orders():
             all_orders.append(row)
 
     db_orders = await database.list_orders()
+    # the list is the latest 200: open live orders must never scroll out of view
+    seen = {o["id"] for o in db_orders}
+    db_orders += [o for o in await order_store.list_open_live() if o["id"] not in seen]
+    for o in db_orders:
+        _strip_internal(o)
     all_orders.extend(db_orders)
     return {"orders": all_orders, "count": len(all_orders)}
 
 
+@router.get("/orders/{order_id}/events")
+async def order_events(order_id: str, _user: dict = Depends(get_current_user)):
+    """Lifecycle history of one order (created, submitted, reconciled, ...)."""
+    if await order_store.get_order(order_id) is None:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+    return {"order_id": order_id, "events": await order_store.list_events(order_id)}
+
+
 @router.post("/orders")
-async def create_order(req: OrderCreateRequest, _user: dict = Depends(require_trader)):
-    order_dict = req.model_dump()
-
-    # 1. Risk check — runs before anything else
-    try:
-        await risk_engine.check_order(order_dict)
-    except RiskCheckError:
-        raise  # Re-raise with 422
-
-    # 2. Require adapter for live-exchange instruments when no risk limits configured.
-    # When risk limits have never been explicitly set, the system is in pristine/demo
-    # mode and live-instrument orders need a connected adapter.
-    # Once limits are explicitly configured, paper trading is permitted on any instrument.
-    if not live_manager.is_connected() and not req.instrument.endswith(".SIM"):
-        limits_configured = await database.risk_limits_explicitly_set()
-        if not limits_configured:
-            raise HTTPException(
-                status_code=400,
-                detail="No adapter connected. Connect an exchange adapter before placing live orders.",
-            )
-
-    # 3. Live routing when adapter is connected
-    exchange_order_id = None
-    if live_manager.is_connected():
-        try:
-            exchange_result = await live_manager.submit_order(order_dict)
-            if isinstance(exchange_result, dict):
-                exchange_order_id = (
-                    exchange_result.get("exchange_order_id")
-                    or exchange_result.get("order_id")
-                )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Exchange error: {str(exc)}")
-
-    # 3. Persist order to DB (paper mode when no adapter, live mode otherwise)
-    order = await database.create_order(
-        instrument=req.instrument,
-        side=req.side,
-        order_type=req.type,
-        quantity=req.quantity,
-        price=req.price,
-    )
-    await database.log_action(
-        action="order_created",
-        user_id=_user.get("sub", ""),
-        resource=f"order:{order['id']}",
-        details=f"instrument={req.instrument} side={req.side} qty={req.quantity} price={req.price}",
-    )
-    result: Dict[str, Any] = {"success": True, "order": order}
-    if exchange_order_id:
-        result["exchange_order_id"] = exchange_order_id
+async def create_order(
+    req: OrderCreateRequest,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key", pattern=_IDEMPOTENCY_KEY_PATTERN),
+    _user: dict = Depends(require_trader),
+):
+    """
+    Place an order. In paper mode it is recorded only; in live mode it goes to the exchange (never
+    silently to paper). Send an `Idempotency-Key` header so a client retry after a timeout returns the
+    same order instead of creating a second one.
+    """
+    import trading_control
+    if not idempotency_key and (await trading_control.get_state())["mode"] == "live":
+        raise HTTPException(status_code=400, detail={
+            "error": "idempotency_key_required",
+            "message": "Live orders require an Idempotency-Key header (one UUID per order) so a retry can never "
+                       "create a second order."})
+    result = await order_service.place(
+        user=_user.get("sub", ""), order=req.model_dump(), idempotency_key=idempotency_key)
+    _strip_internal(result.get("order"))
     return result
 
 
 @router.delete("/orders/{order_id}")
 async def cancel_order(order_id: str, _user: dict = Depends(require_trader)):
-    # If adapter is connected, also cancel on exchange
-    if live_manager.is_connected():
-        try:
-            await live_manager.cancel_order(order_id)
-        except Exception:
-            pass  # Exchange cancel failure should not prevent DB cancel
-
-    cancelled = await database.cancel_order(order_id)
-    if not cancelled:
-        # Still return success if connected (exchange order may not be in DB)
-        if live_manager.is_connected():
-            await database.log_action(
-                action="order_cancelled",
-                user_id=_user.get("sub", ""),
-                resource=f"order:{order_id}",
-                details="cancel sent to exchange",
-            )
-            return {"success": True, "message": f"Order {order_id} cancel sent to exchange"}
-        raise HTTPException(status_code=404, detail=f"Order {order_id} not found or already closed")
-    await database.log_action(
-        action="order_cancelled",
-        user_id=_user.get("sub", ""),
-        resource=f"order:{order_id}",
-    )
-    return {"success": True, "message": f"Order {order_id} cancelled"}
+    return await order_service.cancel(user=_user.get("sub", ""), order_id=order_id)

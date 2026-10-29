@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.indicators import MovingAverageConvergenceDivergence
-from nautilus_trader.model import Bar, OrderSide
+from nautilus_trader.model import Bar, BarType, InstrumentId, OrderSide
 from nautilus_trader.trading import Strategy
 
 
@@ -36,6 +36,10 @@ class MACDStrategy(Strategy):
 
     def __init__(self, config: MACDStrategyConfig) -> None:
         super().__init__(StrategyConfig(order_id_tag=_order_id_tag(config.strategy_id)))
+        # In v2 self.config is the base StrategyConfig, so keep our own settings explicitly.
+        self.instrument_id = InstrumentId.from_str(config.instrument_id)
+        self.bar_type = BarType.from_str(config.bar_type)
+        self.trade_size = config.trade_size
         self.macd = MovingAverageConvergenceDivergence(
             config.fast_period,
             config.slow_period,
@@ -44,10 +48,14 @@ class MACDStrategy(Strategy):
         self._prev_macd: float = 0.0
         self._prev_signal: float = 0.0
         self._initialized_prev: bool = False
+        self.instrument = None
 
     def on_start(self) -> None:
-        self.bar_type = self.config.bar_type
-        self.instrument_id = self.config.instrument_id
+        self.instrument = self.cache.instrument(self.instrument_id)
+        if self.instrument is None:
+            self.log.error(f"Instrument not found: {self.instrument_id}")
+            self.stop()
+            return
         self.register_indicator_for_bars(self.bar_type, self.macd)
         self.subscribe_bars(self.bar_type)
 
@@ -61,10 +69,12 @@ class MACDStrategy(Strategy):
         if self._initialized_prev:
             # Bullish crossover: MACD crosses above signal
             if self._prev_macd <= self._prev_signal and macd_val > signal_val:
+                self._close_shorts()
                 if not self.portfolio.is_net_long(self.instrument_id):
                     self._buy()
             # Bearish crossover: MACD crosses below signal
             elif self._prev_macd >= self._prev_signal and macd_val < signal_val:
+                self._close_longs()
                 if not self.portfolio.is_net_short(self.instrument_id):
                     self._sell()
 
@@ -72,11 +82,21 @@ class MACDStrategy(Strategy):
         self._prev_signal = signal_val
         self._initialized_prev = True
 
+    def _close_longs(self) -> None:
+        for pos in self.cache.positions_open(instrument_id=self.instrument_id):
+            if pos.is_long:
+                self.close_position(pos)
+
+    def _close_shorts(self) -> None:
+        for pos in self.cache.positions_open(instrument_id=self.instrument_id):
+            if pos.is_short:
+                self.close_position(pos)
+
     def _buy(self) -> None:
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
             order_side=OrderSide.BUY,
-            quantity=self.instrument.make_qty(self.config.trade_size),
+            quantity=self.instrument.make_qty(self.trade_size),
         )
         self.submit_order(order)
 
@@ -84,9 +104,10 @@ class MACDStrategy(Strategy):
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
             order_side=OrderSide.SELL,
-            quantity=self.instrument.make_qty(self.config.trade_size),
+            quantity=self.instrument.make_qty(self.trade_size),
         )
         self.submit_order(order)
 
     def on_stop(self) -> None:
         self.close_all_positions(self.instrument_id)
+        self.unsubscribe_bars(self.bar_type)

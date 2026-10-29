@@ -9,12 +9,12 @@
  * - Alert status persistence
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "../helpers/auth";
 
 const API = process.env.BASE_URL ?? "http://localhost:8000";
 
 test.describe("Alerts API", () => {
-  test("create alert returns alert with id and status=active", async ({ request }) => {
+  test("create alert returns alert with id and status=active", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/alerts`, {
       data: {
         symbol: "BTCUSDT",
@@ -30,7 +30,7 @@ test.describe("Alerts API", () => {
     expect(body.alert.status).toBe("active");
   });
 
-  test("created alert appears in list", async ({ request }) => {
+  test("created alert appears in list", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/alerts`, {
       data: {
         symbol: "ETHUSDT",
@@ -47,7 +47,7 @@ test.describe("Alerts API", () => {
     expect(found.symbol).toBe("ETHUSDT");
   });
 
-  test("dismiss active alert changes status to dismissed", async ({ request }) => {
+  test("dismiss active alert changes status to dismissed", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/alerts`, {
       data: { symbol: "SOLUSDT", condition: "above", price: 999_999.0 },
     });
@@ -63,7 +63,7 @@ test.describe("Alerts API", () => {
     expect(found.status).toBe("dismissed");
   });
 
-  test("delete alert removes it from list", async ({ request }) => {
+  test("delete alert removes it from list", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/alerts`, {
       data: { symbol: "BNBUSDT", condition: "below", price: 1.0 },
     });
@@ -77,12 +77,12 @@ test.describe("Alerts API", () => {
     expect(found).toBeFalsy();
   });
 
-  test("dismiss nonexistent alert returns 404", async ({ request }) => {
+  test("dismiss nonexistent alert returns 404", async ({ authRequest: request }) => {
     const r = await request.put(`${API}/api/alerts/ALT-DOES-NOT-EXIST/dismiss`);
     expect(r.status()).toBe(404);
   });
 
-  test("alert supports all valid conditions", async ({ request }) => {
+  test("alert supports all valid conditions", async ({ authRequest: request }) => {
     for (const condition of ["above", "below"]) {
       const r = await request.post(`${API}/api/alerts`, {
         data: {
@@ -95,7 +95,7 @@ test.describe("Alerts API", () => {
     }
   });
 
-  test("alert stats endpoint returns counts", async ({ request }) => {
+  test("alert stats endpoint returns counts", async ({ authRequest: request }) => {
     // Create a few alerts
     for (let i = 0; i < 3; i++) {
       await request.post(`${API}/api/alerts`, {

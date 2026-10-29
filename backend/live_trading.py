@@ -14,7 +14,7 @@ Architecture:
 State:
 - S2-01: LiveTradingManager class with full interface
 - S2-02: connect_binance() / connect_bybit() using REST clients
-- S2-03: submit_order() / cancel_order() via exchange REST APIs
+- S2-03: send_order() / fetch_order() / cancel_venue_order() via exchange REST APIs (orders go through order_service)
 - S2-04: sync_positions() via exchange account queries
 - S2-05: subscribe_ticker() with exponential-backoff reconnect
 """
@@ -26,7 +26,18 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from exchange_clients import BinanceRestClient, BybitRestClient, ExchangeHTTPError
+import re
+import time
+from decimal import Decimal
+
+from exchange_clients import (
+    BinanceRestClient,
+    BybitRestClient,
+    ExchangeError,
+    ExchangeHTTPError,
+    SymbolRules,
+    VenueOrder,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +237,33 @@ class LiveTradingManager:
                 "account_info": account_info,
             }
 
+    async def restore_connections(self) -> None:
+        """
+        Re-establish exchange connections after a restart from the stored (encrypted) credentials,
+        so the reconciler can finish following open live orders. Best-effort: a failure is logged and
+        leaves that venue disconnected (live orders on it then refuse with 503; they never fall back).
+        """
+        import database
+        from credential_utils import decrypt_credential
+
+        for adapter_id in ("binance", "binance_futures", "bybit"):
+            try:
+                cfg = await database.get_adapter_config(adapter_id)
+                if not cfg or cfg.get("status") not in ("connected", "connected_offline"):
+                    continue
+                key = decrypt_credential(cfg.get("api_key") or "")
+                secret = decrypt_credential(cfg.get("api_secret") or "")
+                if not key or not secret:
+                    logger.warning("cannot restore %s: stored credentials are unreadable (wrong ENCRYPTION_KEY?)", adapter_id)
+                    continue
+                if adapter_id == "bybit":
+                    await self.connect_bybit(key, secret)
+                else:
+                    await self.connect_binance(key, secret)
+                logger.info("restored %s connection", adapter_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not restore %s: %s", adapter_id, exc)
+
     async def disconnect(self, adapter_id: str) -> Dict[str, Any]:
         async with self._lock:
             conn = self._connections.get(adapter_id)
@@ -235,126 +273,193 @@ class LiveTradingManager:
                 self._is_active = False
             return {"success": True}
 
-    # ── Order management (via exchange REST APIs) ─────────────────────
+    # ── Venue routing ─────────────────────────────────────────────────────────
 
-    async def submit_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Submit an order via the connected exchange's REST API.
-        Routes to Binance or Bybit based on active connection.
-        """
-        if not self.is_connected():
-            raise RuntimeError("No adapter connected. Connect an exchange adapter first.")
+    _VENUE_OF_ADAPTER = {"binance": "BINANCE", "binance_futures": "BINANCE", "bybit": "BYBIT"}
+    _SYMBOL_RE = re.compile(r"^[A-Z0-9]{4,20}$")
+    _RULES_TTL = 600.0  # seconds
 
+    @staticmethod
+    def to_venue_symbol(instrument: str) -> str:
+        """'BTC/USDT', 'btcusdt' or 'BTCUSDT.BINANCE' -> 'BTCUSDT'; raises ValueError if not a spot symbol."""
+        parts = (instrument or "").split(".")
+        if len(parts) > 2 or (len(parts) == 2 and parts[1].upper() not in ("BINANCE", "BYBIT")):
+            raise ValueError(f"'{instrument}' is not a valid exchange symbol (unknown venue suffix)")
+        sym = parts[0].replace("/", "").replace("-", "").replace("_", "").upper()
+        if not LiveTradingManager._SYMBOL_RE.match(sym):
+            raise ValueError(f"'{instrument}' is not a valid exchange symbol")
+        return sym
+
+    def ready_venues(self) -> List[str]:
+        """Venues with a *verified* connection (credentials accepted by the exchange)."""
+        venues = []
         for adapter_id, conn in self._connections.items():
-            if conn.status not in ("connected", "connected_offline"):
-                continue
-            try:
-                if adapter_id in ("binance", "binance_futures") and conn.binance_spot_api:
-                    return await self._submit_binance_order(conn, order)
-                elif adapter_id == "bybit" and conn.bybit_account_api:
-                    return await self._submit_bybit_order(conn, order)
-            except Exception as exc:
-                logger.warning("Exchange order submission failed (%s): %s", adapter_id, exc)
-                raise RuntimeError(str(exc)) from exc
+            venue = self._VENUE_OF_ADAPTER.get(adapter_id)
+            if venue and conn.status == "connected" and venue not in venues:
+                venues.append(venue)
+        return venues
 
-        raise RuntimeError("No active exchange connection available.")
+    def resolve_venue(self, requested: Optional[str] = None) -> str:
+        """
+        Pick the venue for an order. A requested venue must be verified-connected; with none
+        requested exactly one verified venue must exist (never silently "the first adapter").
+        """
+        ready = self.ready_venues()
+        if requested:
+            venue = requested.upper()
+            if venue not in ready:
+                raise RuntimeError(f"{venue} is not connected/verified")
+            return venue
+        if not ready:
+            raise RuntimeError("No verified exchange connection. Connect an adapter first.")
+        if len(ready) > 1:
+            raise RuntimeError(f"Several venues connected ({', '.join(ready)}): specify the venue")
+        return ready[0]
 
-    async def _submit_binance_order(
-        self, conn: AdapterConnection, order: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        symbol = order.get("instrument", "BTCUSDT").replace("/", "").split(".")[0]
-        side = order.get("side", "BUY").upper()
-        if side not in ("BUY", "SELL"):
-            raise ValueError(f"Unsupported order side: {side}")
-        order_type = order.get("type", "MARKET").upper()
-        if order_type not in ("MARKET", "LIMIT"):
-            raise ValueError(f"Unsupported order type: {order_type}")
-        quantity = str(order.get("quantity", 0.001))
-        price = str(order.get("price")) if order.get("price") else None
-        if order_type == "LIMIT" and price is None:
-            raise ValueError("Limit orders require a price")
-
-        result = await conn.binance_spot_api.new_order(
-            symbol=symbol,
-            side=side,
-            order_type=order_type,
-            quantity=quantity,
-            price=price,
-            time_in_force="GTC" if order_type == "LIMIT" else None,
-        )
-
-        order_id = str(result.get("orderId", ""))
-        return {
-            "success": True,
-            "order_id": order_id,
-            "exchange_order_id": order_id,
-            "client_order_id": str(result.get("clientOrderId", "")),
-            "status": str(result.get("status", "NEW")).lower(),
-            "exchange": "BINANCE",
-        }
-
-    async def _submit_bybit_order(
-        self, conn: AdapterConnection, order: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        symbol = order.get("instrument", "BTCUSDT").replace("/", "").split(".")[0]
-        side = order.get("side", "BUY").capitalize()
-        if side not in ("Buy", "Sell"):
-            raise ValueError(f"Unsupported order side: {side}")
-        order_type = order.get("type", "Market").capitalize()
-        if order_type not in ("Market", "Limit"):
-            raise ValueError(f"Unsupported order type: {order_type}")
-        quantity = str(order.get("quantity", 0.001))
-        price = str(order.get("price")) if order.get("price") else None
-        if order_type == "Limit" and price is None:
-            raise ValueError("Limit orders require a price")
-
-        result = await conn.bybit_account_api.place_order(
-            symbol=symbol,
-            side=side,
-            order_type=order_type,
-            qty=quantity,
-            price=price,
-        )
-
-        order_id = str(result.get("orderId", ""))
-        return {
-            "success": True,
-            "order_id": order_id,
-            "exchange_order_id": order_id,
-            "status": "pending",
-            "exchange": "BYBIT",
-        }
-
-    async def cancel_order(self, order_id: str, symbol: str = "BTCUSDT") -> Dict[str, Any]:
-        """Cancel an order on the connected exchange via REST API."""
-        if not self.is_connected():
-            raise RuntimeError("No adapter connected.")
-
+    def _client_for(self, venue: str, allow_offline: bool = False) -> Any:
+        """
+        REST client of a venue. New orders need a *verified* connection; looking orders up and cancelling
+        them (reconcile, kill switch) also work through an unverified one, so a venue that was unreachable
+        at startup never leaves live orders unmanaged.
+        """
+        ok = ("connected", "connected_offline") if allow_offline else ("connected",)
         for adapter_id, conn in self._connections.items():
-            if conn.status not in ("connected", "connected_offline"):
-                continue
-            try:
-                if adapter_id in ("binance", "binance_futures") and conn.binance_spot_api:
-                    result = await conn.binance_spot_api.cancel_order(
-                        symbol=symbol, order_id=int(order_id) if order_id.isdigit() else None,
-                        orig_client_order_id=None if order_id.isdigit() else order_id,
-                    )
-                    return {
-                        "success": True,
-                        "order_id": order_id,
-                        "status": str(result.get("status", "CANCELED")).lower(),
-                    }
-                elif adapter_id == "bybit" and conn.bybit_account_api:
-                    await conn.bybit_account_api.cancel_order(
-                        symbol=symbol,
-                        order_id=order_id,
-                    )
-                    return {"success": True, "order_id": order_id}
-            except Exception as exc:
-                logger.warning("Exchange cancel order failed (%s): %s", adapter_id, exc)
-                return {"success": False, "order_id": order_id, "error": str(exc)}
+            if self._VENUE_OF_ADAPTER.get(adapter_id) == venue and conn.status in ok:
+                return conn.binance_spot_api if venue == "BINANCE" else conn.bybit_account_api
+        raise RuntimeError(f"{venue} is not connected/verified")
 
-        return {"success": True, "order_id": order_id}
+    async def reverify_offline(self) -> None:
+        """Retry credential verification for connections that were unreachable when established."""
+        for adapter_id, conn in list(self._connections.items()):
+            if conn.status != "connected_offline":
+                continue
+            client = conn.binance_spot_api or conn.bybit_account_api
+            try:
+                await client.account_info()
+                conn.status = "connected"
+                logger.info("%s is reachable again: connection verified", adapter_id)
+            except ExchangeHTTPError as exc:
+                if exc.is_auth:
+                    conn.status = "error"
+                    logger.error("%s credentials rejected on re-verification: %s", adapter_id, exc)
+            except ExchangeError:
+                pass  # still unreachable: try again next round
+
+    # ── Venue data used for pre-trade checks ──────────────────────────────────
+
+    async def rules(self, venue: str, symbol: str) -> SymbolRules:
+        """Symbol filters (cached). A failure to load them raises: orders are not sent unvalidated."""
+        cache = self.__dict__.setdefault("_rules_cache", {})
+        hit = cache.get((venue, symbol))
+        if hit and time.monotonic() - hit[0] < self._RULES_TTL:
+            return hit[1]
+        rules = await self._client_for(venue).symbol_rules(symbol)
+        cache[(venue, symbol)] = (time.monotonic(), rules)
+        return rules
+
+    async def reference_price(self, venue: str, symbol: str) -> Decimal:
+        return await self._client_for(venue).ticker_price(symbol)
+
+    _STABLES = frozenset({"USDT", "USDC", "FDUSD", "BUSD", "TUSD", "DAI", "USD"})
+
+    async def equity_usdt(self, venue: str) -> Optional[Decimal]:
+        """
+        Account equity in USDT (mark-to-market), or None if it cannot be determined.
+        Binance: balances valued with the USDT (or BTC-cross) price; unvaluable dust is ignored.
+        Bybit: the unified account's totalEquity. Deposits/withdrawals change this number — the
+        daily-loss check treats a withdrawal as a loss (safe direction) and a deposit as a gain.
+        """
+        try:
+            client = self._client_for(venue)
+            if venue == "BYBIT":
+                result = await client.wallet_balance()
+                lst = result.get("list") or []
+                return Decimal(str(lst[0]["totalEquity"])) if lst and lst[0].get("totalEquity") not in (None, "") else None
+            info = await client.account_info()
+            prices = await client.all_ticker_prices()
+            btc_usdt = prices.get("BTCUSDT")
+            total = Decimal(0)
+            for b in info.get("balances", []):
+                amount = Decimal(str(b.get("free", "0") or "0")) + Decimal(str(b.get("locked", "0") or "0"))
+                if amount <= 0:
+                    continue
+                asset = str(b.get("asset", ""))
+                if asset in self._STABLES:
+                    total += amount
+                elif f"{asset}USDT" in prices:
+                    total += amount * prices[f"{asset}USDT"]
+                elif f"{asset}BTC" in prices and btc_usdt:
+                    total += amount * prices[f"{asset}BTC"] * btc_usdt
+            return total
+        except Exception as exc:  # noqa: BLE001 - any failure means "unknown": the risk check refuses
+            logger.warning("equity lookup failed (%s): %s", venue, exc)
+            return None
+
+    # ── Order management (via exchange REST APIs) ─────────────────────────────
+
+    async def send_order(
+        self,
+        venue: str,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        qty: str,
+        price: Optional[str],
+        client_order_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Send ONE order attempt carrying our client order id. Raises ExchangeHTTPError /
+        ExchangeTransportError / ExchangeRateLimited; the caller classifies the outcome
+        (`.outcome` = rejected | unknown | not_sent) and reconciles — this method never retries.
+        """
+        client = self._client_for(venue)
+        side_u, type_u = side.upper(), order_type.upper()
+        if side_u not in ("BUY", "SELL"):
+            raise ValueError(f"Unsupported order side: {side}")
+        if type_u not in ("MARKET", "LIMIT"):
+            raise ValueError(f"Unsupported order type: {order_type}")
+        if venue == "BINANCE":
+            body = await client.new_order(
+                symbol=symbol, side=side_u, order_type=type_u, quantity=qty, price=price,
+                time_in_force="GTC" if type_u == "LIMIT" else None, client_order_id=client_order_id)
+            vo = client.parse_order(body)
+            return {"venue_order_id": vo.venue_order_id, "client_order_id": vo.client_order_id or client_order_id,
+                    "raw_status": vo.raw_status, "executed_qty": vo.executed_qty, "avg_price": vo.avg_price}
+        body = await client.place_order(
+            symbol=symbol, side=side_u.capitalize(), order_type=type_u.capitalize(), qty=qty, price=price,
+            client_order_id=client_order_id)
+        # Bybit acknowledges acceptance only (asynchronous): status is learned by querying
+        return {"venue_order_id": str(body.get("orderId", "")),
+                "client_order_id": str(body.get("orderLinkId", "")) or client_order_id,
+                "raw_status": "New", "executed_qty": Decimal(0), "avg_price": None}
+
+    async def fetch_order(self, venue: str, symbol: str, client_order_id: str) -> Optional[VenueOrder]:
+        """Look an order up by OUR client order id. None = the venue says it does not exist."""
+        return await self._client_for(venue, allow_offline=True).get_order(symbol, client_order_id)
+
+    async def cancel_venue_order(
+        self, venue: str, symbol: str, *, client_order_id: str, order_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        client = self._client_for(venue, allow_offline=True)
+        return await client.cancel_order(symbol, order_id=order_id, client_order_id=None if order_id else client_order_id)
+
+    async def free_balance(self, venue: str, asset: str) -> Decimal:
+        """Freely available (not locked) balance of one asset, read fresh from the venue."""
+        client = self._client_for(venue, allow_offline=True)
+        if venue == "BYBIT":
+            result = await client.wallet_balance()
+            for wallet in result.get("list", []):
+                for coin in wallet.get("coin", []):
+                    if coin.get("coin") == asset:
+                        avail = coin.get("availableToWithdraw") or coin.get("walletBalance") or "0"
+                        return Decimal(str(avail or "0"))
+            return Decimal(0)
+        info = await client.account_info()
+        for b in info.get("balances", []):
+            if b.get("asset") == asset:
+                return Decimal(str(b.get("free", "0") or "0"))
+        return Decimal(0)
 
     async def sync_positions(self) -> List[Dict[str, Any]]:
         """
@@ -389,8 +494,8 @@ class LiveTradingManager:
             free = float(balance.get("free", 0) or 0)
             locked = float(balance.get("locked", 0) or 0)
             total = free + locked
-            if total > 0:
-                asset = str(balance.get("asset", ""))
+            asset = str(balance.get("asset", ""))
+            if total > 0 and asset not in self._STABLES:
                 positions.append({
                     "instrument": f"{asset}USDT",
                     "side": "LONG",
@@ -409,8 +514,8 @@ class LiveTradingManager:
         for wallet in result.get("list", []):
             for coin in wallet.get("coin", []):
                 total = float(coin.get("walletBalance", 0) or 0)
-                if total > 0:
-                    asset = str(coin.get("coin", ""))
+                asset = str(coin.get("coin", ""))
+                if total > 0 and asset not in self._STABLES:
                     positions.append({
                         "instrument": f"{asset}USDT",
                         "side": "LONG",
@@ -461,32 +566,27 @@ class LiveTradingManager:
 
 async def process_order_update(update: Dict[str, Any]) -> None:
     """
-    Process an order status update received from the exchange WebSocket.
-    Updates the order status in the DB.
+    Apply an order status update received from an exchange stream/poll to our order row.
+
+    Matches on OUR client order id (Binance `c`/`clientOrderId`, Bybit `orderLinkId`) and goes through
+    the lifecycle state machine, so a late or duplicate message can never move a terminal order.
     """
-    import database
+    import order_state
+    import order_store
 
-    exchange_order_id = update.get("orderId", "")
-    status = update.get("status", "").lower()
-    executed_qty = float(update.get("executedQty", 0))
-
-    if not exchange_order_id:
+    client_order_id = update.get("clientOrderId") or update.get("c") or update.get("orderLinkId") or ""
+    venue = str(update.get("venue", "BINANCE"))
+    new_status = order_state.from_venue_status(venue, update.get("status") or update.get("orderStatus"))
+    if not client_order_id or new_status is None:
         return
-
-    status_map = {
-        "filled": "filled",
-        "partially_filled": "partial",
-        "canceled": "CANCELLED",
-        "cancelled": "CANCELLED",
-        "rejected": "rejected",
-        "pending": "PENDING",
-        "new": "PENDING",
-    }
-    db_status = status_map.get(status, status)
-
-    async with database.aiosqlite.connect(database.DB_PATH) as db:
-        await db.execute(
-            "UPDATE orders SET status=?, filled_qty=? WHERE exchange_order_id=?",
-            (db_status, executed_qty, str(exchange_order_id)),
+    order = await order_store.get_by_client_id(client_order_id)
+    if not order:
+        return
+    try:
+        filled = float(update.get("executedQty") or update.get("cumExecQty") or 0)
+        await order_store.transition(
+            order["id"], new_status, event="venue_update", detail={"source": "update"},
+            filled_qty=filled, exchange_order_id=str(update.get("orderId") or order.get("exchange_order_id") or ""),
         )
-        await db.commit()
+    except order_state.InvalidTransition:
+        logger.info("Ignoring stale update for %s", order["id"])

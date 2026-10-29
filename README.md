@@ -28,7 +28,7 @@ Nautilus Web Interface is a full-stack admin and trading dashboard for [Nautilus
 ┌─────────────────────┐     HTTP/WS      ┌──────────────────────┐     Python
 │   React Frontend    │ ────────────────▶ │  nautilus_fastapi.py │ ──────────▶ NautilusTradingSystem
 │   (TypeScript/Vite) │ ◀──────────────── │  (production server) │            nautilus_core.py
-└─────────────────────┘                   └──────────────────────┘            nautilus_integration.py
+└─────────────────────┘                   └──────────────────────┘
                                                      │
                                           ┌──────────┴──────────┐
                                           │  market_data_service │  ──▶ Binance API
@@ -86,14 +86,10 @@ Frontend starts at `http://localhost:5173`.
 Nautilus-Web-Interface/
 ├── backend/
 │   ├── nautilus_fastapi.py      # Production server (entry point)
-│   ├── nautilus_trader_api.py   # Secondary/reference API implementation
 │   ├── nautilus_core.py         # NautilusTradingSystem wrapper
-│   ├── nautilus_integration.py  # Nautilus manager (strategies, orders, etc.)
 │   ├── market_data_service.py   # Live Binance prices with TTL cache
-│   ├── alerts_db.py             # Async SQLite persistence for alerts
 │   ├── auth.py                  # API key middleware
-│   ├── admin_db_api.py          # Admin database API (port 8001)
-│   ├── nautilus_api.py          # Legacy stub (not used in production)
+│   ├── admin_db_api.py          # Admin database API router (/api/admin/*, admin JWT)
 │   ├── strategies/              # Strategy implementations
 │   ├── .env.example             # Environment variable template
 │   └── requirements.txt

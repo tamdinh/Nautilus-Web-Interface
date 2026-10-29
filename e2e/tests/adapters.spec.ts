@@ -9,12 +9,12 @@
  * - Security: plaintext credentials must not appear in responses
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "../helpers/auth";
 
 const API = process.env.BASE_URL ?? "http://localhost:8000";
 
 test.describe("Adapters API", () => {
-  test("list adapters returns 11+ adapters", async ({ request }) => {
+  test("list adapters returns 11+ adapters", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/adapters`);
     expect(r.status()).toBe(200);
     const body = await r.json();
@@ -25,7 +25,7 @@ test.describe("Adapters API", () => {
     expect(ids).toContain("interactive_brokers");
   });
 
-  test("get single adapter by id", async ({ request }) => {
+  test("get single adapter by id", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/adapters/binance`);
     expect(r.status()).toBe(200);
     const body = await r.json();
@@ -34,12 +34,12 @@ test.describe("Adapters API", () => {
     expect(body.status).toBeTruthy();
   });
 
-  test("get unknown adapter returns 404", async ({ request }) => {
+  test("get unknown adapter returns 404", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/adapters/fake_exchange_xyz`);
     expect(r.status()).toBe(404);
   });
 
-  test("connect adapter with valid credentials returns connected status", async ({ request }) => {
+  test("connect adapter with valid credentials returns connected status", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/adapters/binance/connect`, {
       data: { api_key: "test_key_e2e", api_secret: "test_secret_e2e" },
     });
@@ -49,14 +49,14 @@ test.describe("Adapters API", () => {
     expect(body.status).toBe("connected");
   });
 
-  test("connect adapter without credentials returns 400", async ({ request }) => {
+  test("connect adapter without credentials returns 400", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/adapters/binance/connect`, {
       data: {},
     });
     expect(r.status()).toBe(400);
   });
 
-  test("connect then disconnect changes status to disconnected", async ({ request }) => {
+  test("connect then disconnect changes status to disconnected", async ({ authRequest: request }) => {
     await request.post(`${API}/api/adapters/bybit/connect`, {
       data: { api_key: "k", api_secret: "s" },
     });
@@ -66,23 +66,24 @@ test.describe("Adapters API", () => {
     expect((await r.json()).status).toBe("disconnected");
   });
 
-  test("connected status persists across GET calls", async ({ request }) => {
+  test("connected status persists across GET calls", async ({ authRequest: request }) => {
     await request.post(`${API}/api/adapters/okx/connect`, {
-      data: { api_key: "mykey", api_secret: "mysecret" },
+      // credentials shorter than 8 chars are rejected before any exchange call
+      data: { api_key: "mykey1234", api_secret: "mysecret1234" },
     });
 
     const r = await request.get(`${API}/api/adapters/okx`);
     expect((await r.json()).status).toBe("connected");
   });
 
-  test("disconnect unknown adapter returns 404", async ({ request }) => {
+  test("disconnect unknown adapter returns 404", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/adapters/nonexistent_xyz/disconnect`);
     expect(r.status()).toBe(404);
   });
 
   // ── Security checks (will fail until Sprint 1 encryption implemented) ────
 
-  test("GET adapters list does not leak plaintext credentials", async ({ request }) => {
+  test("GET adapters list does not leak plaintext credentials", async ({ authRequest: request }) => {
     const secretKey = "SUPER_SECRET_E2E_KEY_12345";
     await request.post(`${API}/api/adapters/binance/connect`, {
       data: { api_key: secretKey, api_secret: "secret_value_xyz" },
@@ -96,7 +97,7 @@ test.describe("Adapters API", () => {
     expect(responseText).not.toContain("SUPER_SECRET_E2E_KEY_12345");
   });
 
-  test("GET single adapter does not return full plaintext api_key", async ({ request }) => {
+  test("GET single adapter does not return full plaintext api_key", async ({ authRequest: request }) => {
     const secretKey = "MY_FULL_API_KEY_SHOULD_BE_MASKED";
     await request.post(`${API}/api/adapters/binance/connect`, {
       data: { api_key: secretKey, api_secret: "secret_xyz" },

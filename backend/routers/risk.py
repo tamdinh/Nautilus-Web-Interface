@@ -1,6 +1,7 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
 
 import database
 from auth_jwt import require_admin
@@ -14,9 +15,30 @@ async def get_risk_limits():
     return await database.get_risk_limits()
 
 
+class RiskLimitsUpdate(BaseModel):
+    """Validated limits. Unknown keys are ignored; values must be finite, non-negative numbers."""
+    model_config = ConfigDict(extra="ignore")
+
+    max_position_size: Optional[float] = Field(None, ge=0, le=1e12, allow_inf_nan=False)
+    max_daily_loss: Optional[float] = Field(None, ge=0, le=1e12, allow_inf_nan=False)
+    max_drawdown_pct: Optional[float] = Field(None, ge=0, le=100, allow_inf_nan=False)
+    max_leverage: Optional[float] = Field(None, ge=0, le=1000, allow_inf_nan=False)
+    max_orders_per_day: Optional[int] = Field(None, ge=0, le=1_000_000)
+    max_open_exposure: Optional[float] = Field(None, ge=0, le=1e12, allow_inf_nan=False)
+    totp_code: Optional[str] = Field(None, max_length=8)   # step-up code, required while trading mode is live
+
+
 @router.post("/limits")
-async def update_risk_limits(body: Dict[str, Any] = Body(...), _admin: dict = Depends(require_admin)):
-    limits = await database.update_risk_limits(body)
+async def update_risk_limits(body: RiskLimitsUpdate, _admin: dict = Depends(require_admin)):
+    updates = body.model_dump(exclude_none=True, exclude={"totp_code"})
+    if not updates:
+        raise HTTPException(status_code=422, detail="No risk limits provided")
+    import trading_control, step_up
+    if (await trading_control.get_state())["mode"] == "live":
+        await step_up.verify(_admin["sub"], body.totp_code)   # lifting limits while live moves real money
+    limits = await database.update_risk_limits(updates)
+    await database.log_action(action="risk_limits_updated", user_id=_admin.get("sub", ""),
+                              resource="risk", details=str(updates))
     return {"success": True, "limits": limits}
 
 

@@ -56,7 +56,7 @@ services:
         VITE_NAUTILUS_API_URL: "${VITE_NAUTILUS_API_URL:-http://localhost:8000}"
         VITE_WS_URL: "${VITE_WS_URL:-ws://localhost:8000}"
     ports:
-      - "${FRONTEND_PORT:-3000}:80"
+      - "${FRONTEND_PORT:-3000}:8080"
     depends_on:
       backend:
         condition: service_healthy

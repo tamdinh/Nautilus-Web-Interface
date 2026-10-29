@@ -1,45 +1,68 @@
 name: CI
 
+# Deployment target is Dokploy (it builds the Dockerfiles itself); there is no deploy job here.
+# The former Cloudflare Pages deploy job was removed on purpose (single deploy target).
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  NODE_VERSION: "22"
+
 jobs:
   # ── Backend tests ──────────────────────────────────────────────────────────
   backend-test:
     name: Backend tests (Python 3.13)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-          cache: pip
-          cache-dependency-path: backend/requirements-dev.txt
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install dev dependencies
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/requirements-dev.lock
+
+      - name: Install dependencies (hashed lock, wheels only)
         working-directory: ./backend
-        run: pip install -r requirements-dev.txt
+        run: |
+          uv pip install --system --require-hashes --only-binary :all: -r requirements-dev.lock
 
       - name: Run tests
         working-directory: ./backend
-        run: pytest tests/ -v --tb=short
+        run: |
+          # ENCRYPTION_KEY must be a valid Fernet key, so generate one for this run
+          export ENCRYPTION_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+          pytest tests/ -v --tb=short --timeout=120
 
-  # ── Frontend lint & build ──────────────────────────────────────────────────
+  # ── Frontend typecheck & build ─────────────────────────────────────────────
   frontend-build:
-    name: Frontend build (Node 18)
+    name: Frontend typecheck and build (Node 22)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -47,9 +70,9 @@ jobs:
         working-directory: ./frontend
         run: npm ci
 
-      - name: Lint
+      - name: Typecheck (also what `npm run lint` runs until ESLint is configured)
         working-directory: ./frontend
-        run: npm run lint || true   # non-blocking until lint is fully configured
+        run: npm run typecheck
 
       - name: Build
         working-directory: ./frontend
@@ -58,47 +81,172 @@ jobs:
           VITE_NAUTILUS_API_URL: "http://localhost:8000"
           VITE_WS_URL: "ws://localhost:8000"
 
-  # ── E2E tests (API-level, requires backend running) ────────────────────────
-  e2e-test:
-    name: E2E tests (Playwright)
+  # ── Dependency vulnerability audits ────────────────────────────────────────
+  # Blocking: both are clean as of 2026-10-29 (npm prod deps, pip lock). A new advisory fails CI.
+  audit:
+    name: Dependency audit
     runs-on: ubuntu-latest
-    needs: [backend-test]
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: npm audit (production deps, high+)
+        working-directory: ./frontend
+        run: npm audit --omit=dev --audit-level=high
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: pip-audit against the backend lock
+        working-directory: ./backend
+        run: uvx pip-audit -r requirements.lock --require-hashes --disable-pip --no-deps
+
+  # ── Docker images: build + smoke test (no push) ────────────────────────────
+  docker:
+    name: Docker build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          load: true
+          tags: nautilus-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: Backend refuses to start without secrets (fail-closed)
+        run: |
+          if timeout 90 docker run --rm nautilus-backend:ci; then
+            echo "::error::backend started without SECRET_KEY/ADMIN_PASSWORD/ENCRYPTION_KEY"
+            exit 1
+          fi
+          echo "backend correctly refused to start"
+
+      - name: Backend smoke test (production mode, generated secrets)
+        run: |
+          SECRET_KEY="$(openssl rand -hex 32)"
+          ADMIN_PASSWORD="$(openssl rand -hex 16)"
+          ENCRYPTION_KEY="$(docker run --rm --entrypoint python3 nautilus-backend:ci \
+            -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+          echo "::add-mask::$SECRET_KEY"
+          echo "::add-mask::$ADMIN_PASSWORD"
+          echo "::add-mask::$ENCRYPTION_KEY"
+          docker run -d --name nt-backend -p 8000:8000 \
+            -e SECRET_KEY="$SECRET_KEY" \
+            -e ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+            -e ENCRYPTION_KEY="$ENCRYPTION_KEY" \
+            nautilus-backend:ci
+          curl -sf --retry 30 --retry-delay 2 --retry-connrefused http://localhost:8000/health
+          echo
+          # an authenticated route must work with the generated admin password
+          TOKEN="$(curl -sf -X POST http://localhost:8000/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
+          curl -sf http://localhost:8000/api/engine/info -H "Authorization: Bearer $TOKEN" > /dev/null
+          # unauthenticated access must be rejected
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/admin/users)" = "401"
+
+      - name: Backend container logs
+        if: always()
+        run: docker logs nt-backend || true
+
+      - name: Build frontend bundle on the native runner (dist target)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          target: dist
+          outputs: type=local,dest=./dist-out
+          cache-from: type=gha,scope=frontend-dist
+          cache-to: type=gha,scope=frontend-dist,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          load: true
+          tags: nautilus-frontend:ci
+          cache-from: type=gha,scope=frontend-dist
+
+      - name: Frontend smoke test
+        run: |
+          test -f dist-out/index.html
+          docker run -d --name nt-frontend -p 8080:8080 nautilus-frontend:ci
+          curl -sf --retry 15 --retry-delay 1 --retry-connrefused http://localhost:8080/healthz
+          curl -sI http://localhost:8080/ | grep -i '^x-content-type-options: nosniff'
+          # SPA fallback for client-side routes
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/admin/users)" = "200"
+
+  # ── E2E tests (API-level Playwright specs against a real backend) ──────────
+  # Informational only: nothing deploys from CI, and no other job depends on this one.
+  e2e-test:
+    name: E2E tests (Playwright, API level)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-          cache: pip
-          cache-dependency-path: backend/requirements-dev.txt
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/requirements.lock
 
       - name: Install backend dependencies
         working-directory: ./backend
-        run: pip install -r requirements-dev.txt
+        run: |
+          uv pip install --system --require-hashes --only-binary :all: -r requirements.lock
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
 
-      - name: Install Playwright and dependencies
+      - name: Install Playwright
         working-directory: ./e2e
         run: |
-          npm init -y
-          npm install -D @playwright/test
+          npm ci
           npx playwright install chromium --with-deps
 
       - name: Start backend server
         working-directory: ./backend
         run: |
-          uvicorn nautilus_fastapi:app --host 0.0.0.0 --port 8000 &
-          echo "Waiting for backend to start..."
-          for i in $(seq 1 20); do
-            curl -sf http://localhost:8000/api/health && break
-            sleep 2
-          done
-        env:
-          ENCRYPTION_KEY: "test-ci-encryption-key-32-chars!!"
+          E2E_ADMIN_PASSWORD="$(openssl rand -hex 16)"
+          echo "::add-mask::$E2E_ADMIN_PASSWORD"
+          echo "E2E_ADMIN_PASSWORD=$E2E_ADMIN_PASSWORD" >> "$GITHUB_ENV"
+          # ENVIRONMENT=development is explicit and local to this throw-away job. Exchange base URLs
+          # point at a closed port so adapter specs can never reach a real exchange.
+          ENVIRONMENT=development \
+          SECRET_KEY="$(openssl rand -hex 32)" \
+          ADMIN_PASSWORD="$E2E_ADMIN_PASSWORD" \
+          ENCRYPTION_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" \
+          BINANCE_BASE_URL="http://127.0.0.1:9" \
+          BYBIT_BASE_URL="http://127.0.0.1:9" \
+          RATE_LIMIT_PER_MINUTE=100000 \
+          LOGIN_RATE_LIMIT_PER_MINUTE=100000 \
+          nohup python nautilus_fastapi.py > ../backend-e2e.log 2>&1 &
+          curl -sf --retry 30 --retry-delay 2 --retry-connrefused http://localhost:8000/health
 
       - name: Run E2E tests
         working-directory: ./e2e
@@ -107,6 +255,10 @@ jobs:
           BASE_URL: "http://localhost:8000"
           CI: "true"
 
+      - name: Backend log
+        if: always()
+        run: tail -n 200 backend-e2e.log || true
+
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: always()
@@ -114,40 +266,3 @@ jobs:
           name: playwright-report
           path: e2e/playwright-report/
           retention-days: 7
-
-  # ── Deploy frontend to Cloudflare Pages (main branch only) ─────────────────
-  deploy-frontend:
-    name: Deploy to Cloudflare Pages
-    runs-on: ubuntu-latest
-    needs: [backend-test, frontend-build, e2e-test]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
-        working-directory: ./frontend
-        run: npm ci
-
-      - name: Build
-        working-directory: ./frontend
-        run: npm run build
-        env:
-          VITE_NAUTILUS_API_URL: ${{ secrets.VITE_NAUTILUS_API_URL }}
-          VITE_WS_URL: ${{ secrets.VITE_WS_URL }}
-          VITE_API_KEY: ${{ secrets.VITE_API_KEY }}
-
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: nautilus-web-interface
-          directory: frontend/dist
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}

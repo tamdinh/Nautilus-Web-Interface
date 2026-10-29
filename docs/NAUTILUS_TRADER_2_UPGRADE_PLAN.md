@@ -80,9 +80,9 @@ JWT trong localStorage và URL WebSocket, refresh không thu hồi; rate limit t
 
 ### Phase 0 — Điểm rollback và baseline (làm ngay, rất nhỏ)
 
-- [ ] Khởi tạo git (thư mục chưa có `.git`) hoặc zip snapshot; tạo nhánh.
-- [ ] `requirements.v1.lock.txt` từ `.venv-nt1` (1.231.0); sao lưu `*.db`, catalog, `.env`.
-- [ ] Dọn file rác trong `backend/data` (backup do test tạo).
+- [x] Khởi tạo git và commit baseline (`b13eb6f`, đã push lên `tamdinh/Nautilus-Web-Interface`). Nên tạo thêm tag cho điểm trước-migration nếu có image/commit cũ trên production.
+- [ ] `requirements.v1.lock.txt` từ `.venv-nt1` (1.231.0): vẫn chưa tạo; sao lưu `*.db`, catalog, `.env` của production trước khi deploy.
+- [x] Dọn file rác trong `backend/data` (backup do test tạo); test không còn ghi vào thư mục dữ liệu thật.
 
 ### Phase A — Khóa bề mặt tấn công (BLOCKING) — phần lớn đã làm (2026-10-29)
 
@@ -98,37 +98,39 @@ Findings #1, #2, #3, #8 (RBAC backend), #12, #13.
 
 **Cổng:** quét thủ công không còn endpoint ghi/nhạy cảm nào không xác thực (route inventory: mọi GET qua JWT middleware, mọi mutation qua `require_trader`/`require_admin`); deploy thiếu env thì container từ chối chạy. Đã kiểm chứng ở dev; chưa kiểm chứng trong container Docker/Dokploy.
 
-### Phase B — Nền tảng chất lượng (BLOCKING)
+### Phase B — Nền tảng chất lượng (BLOCKING) — phần lớn đã làm (2026-10-29)
 
-- [ ] Cô lập test: `Path(database.DB_PATH)` đọc lúc gọi (sửa `database_ops.py:15`), env `NAUTILUS_DB_PATH`, fixture autouse bảo vệ DB thật.
-- [ ] CI: `tsc` và lint chặn merge (bỏ `|| true`); không ghi đè `package.json`; sửa E2E có auth; thêm `timeout-minutes`, `pytest-timeout`, build Docker + `curl /health`; Node 22; `npm audit` và `pip-audit`.
-- [ ] Smoke test chạy SMA/RSI/MACD trong `BacktestEngine` (assert lệnh > 0, có FILLED, log không `[ERROR]`); test demo backtest end-to-end; test report.
-- [ ] Lockfile `uv` có hash; Dockerfile dùng `uv`, `--only-binary nautilus_trader` (wheel chỉ `manylinux_2_34`, không alpine); pin digest image; trivy.
-- [ ] SQLite: helper `_connect()` với WAL, `busy_timeout`, `foreign_keys`; dùng cho cả `live_trading.py`.
-- [ ] Catalog: đọc `NAUTILUS_CATALOG_PATH` thật (bỏ ghi đè trong `state.py`), mặc định `/app/data/catalog`, volume, kiểm tra khi khởi động.
-- [ ] Thêm `pandas`; `.dockerignore` loại `.venv*/`; xóa module không dùng.
+- [x] Cô lập test: `NAUTILUS_DB_PATH`/`ADMIN_DB_PATH` trỏ tới thư mục tạm trước khi import app; fixture autouse fail nếu test dùng thư mục dữ liệu thật; `database_ops` đọc đường dẫn lúc gọi (nguyên nhân 3 test fail cũ, nay hết); `/clean` không còn xóa lệnh FILLED (chỉ CANCELLED).
+- [x] Smoke test chạy thật SMA/RSI/MACD trong `BacktestEngine` (có lệnh, có khớp, không lỗi trong callback, đóng vị thế khi stop) + demo backtest end-to-end. Test này bắt được MACD đang hỏng trên v2; đã viết lại `macd_strategy.py` và nối MACD vào `nautilus_core` (trước đây chỉ lưu dict và từ chối backtest). Còn thiếu: test xuất report (`pandas`).
+- [x] SQLite: `database.connect()` áp `busy_timeout` và `synchronous=NORMAL`, WAL bật ở `init_db` (bắt buộc đi cùng `synchronous=NORMAL`: WAL với mặc định FULL làm commit chậm ~26 lần trên máy thử, suite test từ 3,5 lên 11 phút); backup dùng `sqlite3.backup()` (an toàn với WAL). **Chưa làm:** `foreign_keys=ON` (có thể làm hỏng hành vi hiện tại, cần rà schema), retry khi locked, hai service ghi chung DB không còn (đã gộp admin API).
+- [x] Catalog: `NAUTILUS_CATALOG_PATH` thật sự được đọc (bỏ ghi đè trong `state.py`), mặc định `backend/data/catalog` (`/app/data/catalog` trong image, nằm trên volume).
+- [x] Xóa module không dùng: `nautilus_api.py`, `nautilus_instance.py`, `nautilus_integration.py`, `nautilus_trader_api.py`, `alerts_db.py`, file giữ chỗ `nautilus_data`; dọn tham chiếu trong README, DocsPage, workflow template.
+- [x] Dependency: thêm `pandas`, `pytest-timeout`; **chuyển `python-jose` sang `PyJWT`** (pip-audit báo `ecdsa`/`python-jose`); `npm audit fix`, bỏ `axios`/`nanoid` không dùng: audit prod deps frontend và `pip-audit` đều 0 lỗ hổng.
+- [x] Lockfile có hash bằng `uv` (`backend/requirements.lock`, `requirements-dev.lock`; universal, đã cài thử `--require-hashes`, đủ wheel `manylinux_2_34` x86_64 và aarch64).
+- [x] CI viết lại: Python 3.13/Node 22, `timeout-minutes`, `pytest --timeout`, typecheck và build blocking, `npm audit` và `pip-audit` blocking, job Docker (build + smoke test fail-closed + `/health` + header frontend), e2e API-level có auth (65/65 pass khi chạy thử cục bộ), bỏ deploy Cloudflare Pages. **Chưa chạy trên GitHub, Docker chưa build được trên máy này.**
+- [x] Docker: backend cài từ lock bằng `uv`, không chứa secret, chạy đúng 1 process; frontend dùng `nginx.conf` thật (security headers, cache), non-root `nginx-unprivileged` cổng 8080 (compose đã đổi `:8080`; **Dokploy phải trỏ domain tới cổng 8080**), stage `dist` (ý tưởng chingyap1).
+- [x] **Sửa lỗ hổng phát hiện thêm:** trang bật 2FA gửi secret TOTP (`otpauth://`) tới `api.qrserver.com`; nay render QR cục bộ (`qrcode.react`).
+- [ ] Còn lại: pin digest cho image `nginx-unprivileged`/`python` và uv; build Docker + chạy CI thật; `foreign_keys`; test report `pandas`; chunk frontend 844 kB (`manualChunks`, Phase E); dev-dependency audit (`npm audit` đầy đủ còn lỗi cần nâng major); `ENCRYPTION_KEY` trong CI đã sinh hợp lệ.
 
-**Cổng:** CI xanh trên nhánh sạch, image build từ lockfile, `import nautilus_fastapi` và `/health` thật trong container.
+**Cổng:** CI xanh trên nhánh sạch, image build từ lockfile, `import nautilus_fastapi` và `/health` thật trong container. *Đã kiểm chứng cục bộ: toàn bộ test backend, typecheck, build frontend, e2e API; chưa kiểm chứng: Docker và CI trên GitHub.*
 
-### Phase C — An toàn giao dịch (BLOCKING, phần việc lớn nhất)
+### Phase C — An toàn giao dịch (BLOCKING) — phần lõi đã làm (2026-10-29)
 
-Thứ tự: #4, #5, #6, #11, #7, #9, #26, #10.
+Đã cài và kiểm thử với sàn giả (381 test backend pass). **Chưa kiểm chứng với sàn thật/testnet**: đó là cổng còn lại của phase này.
 
-- [ ] Chế độ `paper`/`live` tường minh; live mà không tới được sàn thì 503, không fallback; reconnect adapter khi khởi động.
-- [ ] Client order id (`newClientOrderId`/`orderLinkId`), trạng thái `PENDING_SUBMIT` ghi trước khi gửi, `Idempotency-Key`; timeout thì truy vấn theo client id.
-- [ ] Vòng đời lệnh: poll hoặc user-data stream, reconcile lệnh và số dư khi khởi động; ghi `exchange_order_id`; hủy/đóng chỉ ghi trạng thái cuối khi sàn xác nhận; phân biệt từ chối 4xx với kết quả không rõ.
-- [ ] Risk fail-closed: định giá MARKET theo mark price, tính lỗ từ fill thật, lock/reserve, validate bằng Pydantic, bắt buộc đặt limit trước khi live, whitelist instrument và `max_qty` cứng.
-- [ ] Exchange: đồng bộ giờ (`/time`), xử lý 429, cache `exchangeInfo` và validate lot/tick/minNotional, `Decimal` thay float, định tuyến theo venue; gỡ `binance_futures` và Bybit khỏi đường live đến khi có test.
-- [ ] Đóng vị thế: chỉ sau fill xác nhận, từ chối vị thế không rõ, chạy risk check, ghi audit.
-- [ ] Kill switch: cờ `trading_enabled` lưu bền, hủy mọi lệnh mở, tùy chọn flatten; nút trong Admin panel.
-- [ ] 2FA bắt buộc cho admin; TOTP lưu mã hóa, chống replay.
+- [x] **Chế độ paper/live tường minh + kill switch bền** (`trading_control.py`, `/api/trading/*`): mặc định paper và disarmed; adapter kết nối không tự biến lệnh thành thật; live không bao giờ fallback sang paper (503); mọi lần restart/restore DB đều quay về disarmed; vào live và arm cần admin + step-up TOTP và đủ điều kiện (sàn đã xác minh, giới hạn rủi ro do admin lưu); kill không cần step-up và không bị rate limit.
+- [x] **Vòng đời lệnh** (`order_state.py`, `order_store.py`, `order_service.py`): lưu `PENDING_SUBMIT` trước khi gửi, client order id của ta, một lần gửi duy nhất, phân loại kết quả (accepted / rejected / not_sent / unknown), `UNKNOWN` được tra theo client id (không retry mù, 202 "đừng gửi lại"), compare-and-set, `order_events` làm nhật ký, `Idempotency-Key` bắt buộc ở chế độ live, gửi lệnh chạy trong task riêng nên client ngắt kết nối không bỏ rơi lệnh.
+- [x] **Đối soát** (`reconcile_all`, vòng lặp nền, mỗi 15s): theo dõi mọi lệnh live chưa kết thúc; chỉ kết luận "chưa từng tới sàn" sau 120s và ≥3 lần không thấy; thử lại xác minh sàn offline; hủy tự động các lệnh xuất hiện muộn sau kill (`cancel_pending`).
+- [x] **Client sàn** (`exchange_clients.py`): đối chiếu tài liệu chính thức; Bybit market theo base (`marketUnit=baseCoin`), tra theo `orderLinkId` (realtime rồi history); đồng bộ giờ + thử lại -1021/10002; chặn cục bộ khi bị 429/418/10006; phân loại lỗi bảo thủ (chỉ mã lỗi được liệt kê mới là "rejected").
+- [x] **Kiểm tra trước khi gửi** (`order_rules.py`): bộ lọc lot/tick/notional của sàn (không làm tròn ngầm), `Decimal` xuyên suốt, chỉ cặp quote USD-like, giá tham chiếu bắt buộc cho lệnh market.
+- [x] **Rủi ro fail-closed** (`risk_engine.check_live_order`): bắt buộc đủ giới hạn do admin lưu; giá trị lệnh, số lệnh/ngày, độ phơi nhiễm lệnh treo, lỗ ngày theo equity từng sàn (không đọc được equity thì từ chối); vi phạm thì disarm và thu hồi lệnh đang treo; đổi giới hạn khi đang live cần step-up.
+- [x] **Đóng vị thế** bằng lệnh MARKET qua đúng đường đặt lệnh (số dư free thật từ sàn, chống bấm đúp 30s); danh sách vị thế sàn thay snapshot thay vì cộng dồn; từ chối vị thế không rõ.
+- [x] **Step-up TOTP** (`step_up.py`): mã dùng một lần (lưu bền chống replay), secret TOTP mã hóa khi lưu; `2fa/setup` không còn ghi đè authenticator đang bật; khôi phục DB cần step-up và luôn kết thúc ở trạng thái disarmed.
+- [x] **Frontend** tối thiểu: không tự retry POST/DELETE, gửi `Idempotency-Key` và số dạng chuỗi, hiển thị 202 là cảnh báo (không phải thành công), trạng thái lệnh mới và nút hủy cho lệnh live.
+- [x] **Review đối kháng** (45 agent, 38 phát hiện đã xác nhận): các lỗi mức cao/trung bình đã sửa và có test riêng (kill switch giữa chừng, lệnh UNKNOWN sau kill, phân loại lỗi Bybit/Binance, baseline lỗ theo sàn, 2FA setup, disconnect khi còn lệnh mở, `/clean` xóa lệnh live, thiếu Idempotency-Key, v.v.).
+- [ ] **Còn lại:** chạy trọn bộ kịch bản trên **testnet** (đặt, hủy, trùng, timeout, restart, vượt risk, kill) — chưa làm; kiểm chứng định dạng/lỗi thật của sàn (đặc biệt Bybit `realtime/history`); cảnh báo vận hành khi lệnh live kẹt `UNKNOWN`/không thấy trên sàn; UI kill switch/banner chế độ (Phase E1); `max_open_exposure` chưa tính lệnh market đang bay và số dư đã khớp; `foreign_keys`; adapter connect cần step-up khi đang live; exposure theo vị thế thật; futures/margin chưa hỗ trợ (chỉ spot, cặp quote USD-like); Binance `canWithdraw`/giới hạn IP của API key chưa kiểm tra.
 
-- [ ] *(học từ fork chingyap1)* **Interlock có lease tự gia hạn** làm nền cho kill switch: cờ `trading_enabled`/paused lưu bền kèm lease 30s; backend gia hạn mỗi 10s chỉ khi lease còn hạn, nên backend chết hoặc treo thì giao dịch tự dừng (fail-closed); resume dùng compare-and-set trong transaction để lệnh pause của người vận hành luôn thắng race. Tham khảo: `stores.py` (`InterlockStore.resume_if_unchanged`/`renew_if_fresh`), `_renew_interlock_loop` trong `nautilus_fastapi.py`, `tests/test_interlock_renewal.py`.
-- [ ] *(học từ chingyap1)* **Step-up TOTP cho hành động nguy hiểm** (resume interlock, kill switch, thay đổi limit, kết nối adapter): mã mới mỗi lần, cửa sổ nâng quyền 5 phút, từ chối dùng lại mã. Tham khảo `step_up.py` và `tests/test_2fa.py`. **Phải làm khác bản gốc:** lưu bảng mã đã dùng bền (không chỉ trong bộ nhớ), mã hóa secret TOTP bằng Fernet của ta (bản gốc lưu plaintext), dùng `pyotp`.
-- [ ] *(học từ chingyap1)* **Bảng `commands`/`orders` có máy trạng thái** PENDING_SUBMIT → SUBMITTED → ACCEPTED/FILLED/… → RECONCILIATION_REQUIRED, kèm `client_order_id`, `venue_order_id`. Tham khảo `commands.py` và `tests/test_commands*.py`, `test_command_processor_recovery.py`. **Phải làm khác:** số lượng/giá dùng `Decimal`/TEXT (bản gốc dùng REAL float); idempotency key do client gửi (`Idempotency-Key`), không suy từ instrument-side-qty-price (key đó chặn cả lệnh lặp hợp lệ); thêm quy tắc "approval/proposal đã dùng thì retry cần cái mới".
-- [ ] Độ tươi heartbeat/live-node: tính từ tuổi heartbeat; lỗi lưu trữ hoặc tuổi âm thì coi là **không online**, không bao giờ coi là online (dùng cho `/readyz` và banner kill switch).
-
-**Cổng:** bộ kịch bản testnet (đặt, hủy, trùng lặp, timeout, restart-reconcile, vượt risk, kill switch) đạt.
+**Cổng:** kịch bản testnet đạt và soak 7 ngày (xem tiêu chí staging).
 
 ### Phase D — Vận hành trên Dokploy (BLOCKING một phần)
 

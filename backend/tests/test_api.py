@@ -388,12 +388,22 @@ def test_adapter_get_unknown(client):
 
 
 def test_adapter_connect(client):
+    from unittest.mock import AsyncMock, patch
     payload = {"api_key": "test-key-abc", "api_secret": "test-secret-xyz"}
-    r = client.post("/api/adapters/binance/connect", json=payload)
+    with patch("live_trading.LiveTradingManager._verify_binance_credentials", new_callable=AsyncMock,
+               return_value={"valid": True, "can_trade": True, "account_type": "SPOT"}):
+        r = client.post("/api/adapters/binance/connect", json=payload)
     assert r.status_code == 200
     body = r.json()
     assert body["success"] is True
     assert body["status"] == "connected"
+
+
+def test_adapter_connect_unreachable_exchange_is_not_reported_as_connected(client):
+    """Network blocked in tests: credentials could not be verified -> connected_offline, never 'connected'."""
+    r = client.post("/api/adapters/binance/connect", json={"api_key": "test-key-abc", "api_secret": "test-secret-xyz"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "connected_offline"
 
 
 def test_adapter_connect_missing_credentials(client):
@@ -592,12 +602,9 @@ def test_positions_list(client):
 
 
 def test_close_nonexistent_position(client):
-    """Closing an unknown position ID still returns 200 (graceful no-op)."""
+    """Closing an unknown position ID is refused (404), not silently reported as success."""
     r = client.post("/api/positions/POS-DOESNOTEXIST/close")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["success"] is True
-    assert body["closed_in_db"] is False
+    assert r.status_code == 404
 
 
 # ── Risk — validation ─────────────────────────────────────────────────────────

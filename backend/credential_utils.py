@@ -38,6 +38,11 @@ def _get_fernet() -> MultiFernet:
     return MultiFernet([Fernet(k.strip().encode()) for k in raw.split(",") if k.strip()])
 
 
+def has_persistent_key() -> bool:
+    """True when ENCRYPTION_KEY is configured (so ciphertext survives a restart)."""
+    return bool(os.getenv("ENCRYPTION_KEY", "").strip())
+
+
 def validate_encryption_key() -> None:
     """Raise if ENCRYPTION_KEY is missing (outside dev) or not a valid Fernet key. Call at startup."""
     _get_fernet()

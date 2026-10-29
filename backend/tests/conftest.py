@@ -6,6 +6,7 @@ Resets module-level rate-limit counters before each test so that the
 5-req/minute cap that accumulates across the test session.
 """
 import sys
+import tempfile
 from pathlib import Path
 
 import os
@@ -14,6 +15,14 @@ import pytest
 
 # Tests run as a development deployment (weak default secrets are tolerated).
 os.environ.setdefault("ENVIRONMENT", "development")
+# Tests drive reconciliation explicitly; no background loop
+os.environ.setdefault("ORDER_RECONCILER_ENABLED", "0")
+
+# Point every database at a throw-away directory BEFORE the app modules are imported, so a test that
+# forgets to monkeypatch a path can never touch the developer's/real data under backend/data.
+_TEST_DATA_DIR = tempfile.mkdtemp(prefix="nautilus-tests-")
+os.environ["NAUTILUS_DB_PATH"] = str(Path(_TEST_DATA_DIR) / "nautilus.db")
+os.environ["ADMIN_DB_PATH"] = str(Path(_TEST_DATA_DIR) / "admin_panel.db")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -77,3 +86,28 @@ def isolate_admin_db(tmp_path, monkeypatch):
     import admin_db_api
     monkeypatch.setattr(admin_db_api, "DB_PATH", str(tmp_path / "admin_panel.db"))
     yield
+
+
+@pytest.fixture(autouse=True)
+def forbid_real_data_dir():
+    """Fail loudly if any test ends up pointing at the real backend/data directory."""
+    import database
+    real = (Path(__file__).parent.parent / "data").resolve()
+    assert real not in Path(database.DB_PATH).resolve().parents, "test is using the real database"
+    yield
+
+
+@pytest.fixture
+def fake_venue(monkeypatch):
+    """Replace the exchange side of the shared order service with a scripted fake venue."""
+    import order_service as osvc
+    import routers.trading as rt
+    from tests.test_order_service import FakeManager
+
+    monkeypatch.setattr(osvc, "LOOKUP_DELAY", 0)
+    fake = FakeManager()
+    monkeypatch.setattr(osvc.order_service, "manager", fake)
+    monkeypatch.setattr(rt, "live_manager", fake)
+    import routers.positions as rp
+    monkeypatch.setattr(rp, "live_manager", fake)
+    return fake

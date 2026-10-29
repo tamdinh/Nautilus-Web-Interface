@@ -171,6 +171,13 @@ async def setup_2fa(payload: dict = Depends(get_current_user)):
     The caller must confirm with /2fa/enable before 2FA is actually enforced.
     """
     username = payload["sub"]
+    existing = await database.get_user_2fa(username)
+    if existing and existing.get("two_factor_enabled"):
+        # A JWT alone must never replace the authenticator secret that step-up and login rely on
+        raise HTTPException(
+            status_code=409,
+            detail="2FA is already enabled: disable it with a valid code before setting up a new authenticator",
+        )
     secret = pyotp.random_base32()
 
     # Store unactivated secret

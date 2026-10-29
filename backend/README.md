@@ -15,8 +15,7 @@ uvicorn nautilus_fastapi:app --host 0.0.0.0 --port 8000
 Server starts on `http://localhost:8000`.
 Interactive API docs: `http://localhost:8000/docs`
 
-> `nautilus_trader_api.py` is a secondary/reference implementation.
-> Use `nautilus_fastapi.py` for production — it has all endpoints the frontend requires.
+> `nautilus_fastapi.py` is the single backend entry point (REST + WebSocket + admin API).
 
 ## Setup
 
@@ -48,14 +47,10 @@ openssl rand -hex 32
 | File | Description |
 |------|-------------|
 | `nautilus_fastapi.py` | **Production entry point** — full REST API + WebSocket |
-| `nautilus_trader_api.py` | Secondary/reference implementation |
 | `nautilus_core.py` | `NautilusTradingSystem` wrapper around Nautilus Trader |
-| `nautilus_integration.py` | Manager for strategies, orders, positions, risk |
 | `market_data_service.py` | Live Binance ticker data with 5s TTL cache + fallback |
-| `alerts_db.py` | Async SQLite persistence for price alerts |
 | `auth.py` | `ApiKeyMiddleware` — optional API key gate for all endpoints |
 | `admin_db_api.py` | Admin database API router, mounted in the main app under `/api/admin/*` (admin JWT required) |
-| `nautilus_api.py` | Legacy stub (not used in production) |
 | `strategies/` | Strategy implementations |
 | `.env.example` | Environment variable template |
 | `requirements.txt` | Python dependencies |

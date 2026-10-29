@@ -1,6 +1,9 @@
 node_modules/
 dist/
+dist-out/
 .env
 .env.*
 .git/
 *.md
+*.log
+coverage/

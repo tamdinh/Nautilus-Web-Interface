@@ -12,21 +12,22 @@
  * - Invalid strategy parameters are rejected
  */
 
-import { test, expect, APIRequestContext } from "@playwright/test";
+import { APIRequestContext } from "@playwright/test";
+import { test, expect } from "../helpers/auth";
 import { createStrategy, clearAllStrategies } from "../helpers/api";
 
 const API = process.env.BASE_URL ?? "http://localhost:8000";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
-test.beforeEach(async ({ request }) => {
+test.beforeEach(async ({ authRequest: request }) => {
   await clearAllStrategies(request);
 });
 
 // ── Strategy CRUD via API ─────────────────────────────────────────────────────
 
 test.describe("Strategy API — CRUD", () => {
-  test("create SMA strategy returns strategy_id", async ({ request }) => {
+  test("create SMA strategy returns strategy_id", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/strategies`, {
       data: {
         name: "SMA E2E Test",
@@ -42,7 +43,7 @@ test.describe("Strategy API — CRUD", () => {
     expect(body.strategy_id.length).toBeGreaterThan(0);
   });
 
-  test("create RSI strategy returns strategy_id", async ({ request }) => {
+  test("create RSI strategy returns strategy_id", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/strategies`, {
       data: {
         name: "RSI E2E Test",
@@ -57,7 +58,7 @@ test.describe("Strategy API — CRUD", () => {
     expect(body.success).toBe(true);
   });
 
-  test("strategy appears in list after creation", async ({ request }) => {
+  test("strategy appears in list after creation", async ({ authRequest: request }) => {
     const sid = await createStrategy(request, {
       name: "List Check E2E",
       type: "sma_crossover",
@@ -70,7 +71,7 @@ test.describe("Strategy API — CRUD", () => {
     expect(found.name).toBe("List Check E2E");
   });
 
-  test("invalid SMA periods (fast >= slow) returns 422", async ({ request }) => {
+  test("invalid SMA periods (fast >= slow) returns 422", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/strategies`, {
       data: {
         name: "Bad Periods",
@@ -82,21 +83,21 @@ test.describe("Strategy API — CRUD", () => {
     expect(r.status()).toBe(422);
   });
 
-  test("missing name returns 422", async ({ request }) => {
+  test("missing name returns 422", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/strategies`, {
       data: { type: "sma_crossover" },
     });
     expect(r.status()).toBe(422);
   });
 
-  test("unknown strategy type returns 400 or 422", async ({ request }) => {
+  test("unknown strategy type returns 400 or 422", async ({ authRequest: request }) => {
     const r = await request.post(`${API}/api/strategies`, {
       data: { name: "AI Trader", type: "deep_learning_v9" },
     });
     expect([400, 422]).toContain(r.status());
   });
 
-  test("delete strategy removes from list", async ({ request }) => {
+  test("delete strategy removes from list", async ({ authRequest: request }) => {
     const sid = await createStrategy(request, {
       name: "Delete Me",
       type: "sma_crossover",
@@ -111,7 +112,7 @@ test.describe("Strategy API — CRUD", () => {
     expect(found).toBeFalsy();
   });
 
-  test("start and stop strategy changes status", async ({ request }) => {
+  test("start and stop strategy changes status", async ({ authRequest: request }) => {
     const sid = await createStrategy(request, {
       name: "Start Stop E2E",
       type: "rsi",
@@ -136,7 +137,7 @@ test.describe("Strategy API — CRUD", () => {
 // ── Strategy API — Types Registry ─────────────────────────────────────────────
 
 test.describe("Strategy Types Registry", () => {
-  test("GET /api/strategy-types returns sma_crossover and rsi", async ({ request }) => {
+  test("GET /api/strategy-types returns sma_crossover and rsi", async ({ authRequest: request }) => {
     const r = await request.get(`${API}/api/strategy-types`);
     expect(r.status()).toBe(200);
     const body = await r.json();
