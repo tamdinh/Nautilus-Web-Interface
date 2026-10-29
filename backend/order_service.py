@@ -29,6 +29,7 @@ from fastapi import HTTPException
 
 import database
 import order_state
+import ops_alerts
 import order_store
 import trading_control
 from exchange_clients import (
@@ -48,6 +49,7 @@ RECONCILE_INTERVAL = float(os.getenv("RECONCILE_INTERVAL_SECS", "15"))
 NOT_FOUND_GRACE_SECS = float(os.getenv("ORDER_NOT_FOUND_GRACE_SECS", "120"))
 NOT_FOUND_MIN_CHECKS = 3
 LOOKUP_ATTEMPTS = 3
+STUCK_UNKNOWN_SECONDS = float(os.getenv("ORDER_STUCK_UNKNOWN_SECS", "300"))
 LOOKUP_DELAY = float(os.getenv("ORDER_LOOKUP_DELAY_SECS", "0.5"))
 # Risk limits are denominated in USD-like units, so live trading is limited to pairs quoted in them
 STABLE_QUOTES = ("USDT", "USDC", "FDUSD", "BUSD")
@@ -266,6 +268,11 @@ class OrderService:
     async def _on_submit_error(self, row: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
         outcome = getattr(exc, "outcome", "unknown")
         message = str(exc)
+        if outcome in ("rejected", "not_sent"):
+            await ops_alerts.enqueue(
+                "order_rejected" if outcome == "rejected" else "order_not_sent",
+                f"{row['venue']} {row['instrument']} order {row['id']}: {message[:300]}",
+                severity="warning", dedupe_key=f"{outcome}:{row['venue']}:{message[:80]}", dedupe_seconds=600)
         if outcome == "rejected":
             await order_store.transition(row["id"], order_state.REJECTED, expected=order_state.PENDING_SUBMIT,
                                          event="rejected", detail={"error": message}, last_error=message[:500])
@@ -284,6 +291,11 @@ class OrderService:
         updated = await order_store.transition(
             row["id"], order_state.UNKNOWN, expected=order_state.PENDING_SUBMIT,
             event="outcome_unknown", detail={"error": message}, last_error=message[:500])
+        await ops_alerts.enqueue(
+            "order_outcome_unknown",
+            f"{row['venue']} {row['instrument']} order {row['id']}: exchange did not answer ({message[:200]}). "
+            "It may exist on the exchange; do not resend.",
+            dedupe_key=f"unknown:{row['id']}", dedupe_seconds=3600)
         for attempt in range(LOOKUP_ATTEMPTS):
             await asyncio.sleep(LOOKUP_DELAY * (attempt + 1))
             try:
@@ -436,7 +448,24 @@ class OrderService:
             except Exception:  # noqa: BLE001 - one bad order must not stop the round
                 logger.exception("reconcile failed for %s", row.get("id"))
             await asyncio.sleep(0.05)  # stay well inside venue rate limits
+        await self._alert_stuck(orders)
         return len(orders)
+
+    async def _alert_stuck(self, orders: List[Dict[str, Any]]) -> None:
+        """Page when a live order stays UNKNOWN / not final for too long (needs a human to check the venue)."""
+        now = datetime.now(timezone.utc)
+        for row in orders:
+            try:
+                age = (now - datetime.fromisoformat(row["timestamp"])).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                continue
+            current = await order_store.get_order(row["id"])
+            if current and current["status"] == order_state.UNKNOWN and age >= STUCK_UNKNOWN_SECONDS:
+                await ops_alerts.enqueue(
+                    "order_stuck_unknown",
+                    f"{row['venue']} {row['instrument']} order {row['id']} has been UNKNOWN for {int(age)}s. "
+                    "Check the exchange manually.",
+                    dedupe_key=f"stuck:{row['id']}", dedupe_seconds=1800)
 
     async def _kill_cancel(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Best-effort cancel of one order because the kill switch was pulled; learns the final state."""

@@ -342,6 +342,10 @@ class LiveTradingManager:
                 if exc.is_auth:
                     conn.status = "error"
                     logger.error("%s credentials rejected on re-verification: %s", adapter_id, exc)
+                    import ops_alerts
+                    await ops_alerts.enqueue("venue_credentials_rejected",
+                                             f"{adapter_id}: exchange rejected the API credentials",
+                                             dedupe_key=f"cred:{adapter_id}", dedupe_seconds=3600)
             except ExchangeError:
                 pass  # still unreachable: try again next round
 

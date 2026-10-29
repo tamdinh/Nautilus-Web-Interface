@@ -95,8 +95,12 @@ async def disarm(user: str, reason: str, cancel_open: bool = False) -> Dict[str,
     Kill switch: refuse every further live order. With `cancel_open`, orders that are still being
     submitted or whose outcome is unknown are cancelled too as soon as they turn up on the venue.
     """
-    return await _write(user, reason or "kill switch", enabled=False,
-                        cancel_pending=True if cancel_open else None)
+    state = await _write(user, reason or "kill switch", enabled=False,
+                         cancel_pending=True if cancel_open else None)
+    import ops_alerts  # lazy: ops_alerts imports database
+    await ops_alerts.enqueue("trading_disarmed", f"Live trading disarmed by {user}: {reason or 'kill switch'}",
+                             dedupe_key=f"disarm:{user}:{reason}", dedupe_seconds=60)
+    return state
 
 
 async def reset_on_startup() -> Dict[str, Any]:

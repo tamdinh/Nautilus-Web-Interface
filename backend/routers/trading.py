@@ -86,6 +86,13 @@ async def arm(req: ArmRequest, admin: dict = Depends(require_admin)):
     return {"success": True, **new_state}
 
 
+@router.get("/ops-alerts")
+async def list_ops_alerts(limit: int = 100, _admin: dict = Depends(require_admin)):
+    """Operational alert outbox (delivery status, attempts, last error) for admins."""
+    import ops_alerts
+    return {"alerts": await ops_alerts.list_outbox(max(1, min(limit, 500)))}
+
+
 @router.post("/kill")
 async def kill(req: KillRequest, user: dict = Depends(require_trader)):
     result = await order_service.kill(user=user["sub"], reason=req.reason, cancel_open=req.cancel_open)

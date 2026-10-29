@@ -69,7 +69,9 @@ class TelegramNotifier:
                 url,
                 json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
             )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # never include the request URL: it contains the bot token
+                raise RuntimeError(f"Telegram API returned HTTP {resp.status_code}")
 
 
 # ── Module-level notifier singletons ─────────────────────────────────────────
