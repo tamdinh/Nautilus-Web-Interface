@@ -104,11 +104,11 @@ export default function AdminDashboard() {
           <Card>
             <CardHeader>
               <CardTitle>💾 Database</CardTitle>
-              <CardDescription>PostgreSQL, Parquet, Redis management</CardDescription>
+              <CardDescription>SQLite backup, restore and maintenance</CardDescription>
             </CardHeader>
             <CardContent>
               <p className="text-sm text-gray-600 mb-4">
-                Manage database operations, backups, and cache optimization.
+                Create and restore backups, optimize and clean the database.
               </p>
               <Button className="w-full" onClick={() => window.location.href = '/admin/database'}>
                 Open Database
@@ -187,22 +187,6 @@ export default function AdminDashboard() {
               </p>
               <Button onClick={() => window.location.href = '/admin/settings'}>
                 Settings
-              </Button>
-            </CardContent>
-          </Card>
-
-          {/* Database Management Card */}
-          <Card>
-            <CardHeader>
-              <CardTitle>💾 Database Management</CardTitle>
-              <CardDescription>Comprehensive database administration</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-gray-600 mb-4">
-                Manage database connections, execute queries, and create backups.
-              </p>
-              <Button onClick={() => window.location.href = '/admin/database'}>
-                Manage Databases
               </Button>
             </CardContent>
           </Card>

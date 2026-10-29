@@ -1,129 +1,204 @@
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useNotification } from "@/contexts/NotificationContext";
-import nautilusService from "@/services/nautilusService";
+import api from "@/lib/api";
 
+interface BackupFile {
+  filename: string;
+  size_mb: number;
+  created_at: string;
+}
+
+interface OpResult {
+  success?: boolean;
+  message?: string;
+}
+
+/** SQLite database administration: backup, restore (TOTP step-up), optimize, clean. */
 export default function DatabasePage() {
-  const { success, info, warning, error } = useNotification();
+  const { success, error, warning } = useNotification();
+  const [backups, setBackups] = useState<BackupFile[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [needCode, setNeedCode] = useState(true);
+  const [restoreTarget, setRestoreTarget] = useState<string | null>(null);
+  const [totp, setTotp] = useState("");
 
-  const handleBackup = async (db: string) => {
+  const loadBackups = useCallback(async () => {
     try {
-      info(`Starting backup for ${db}...`);
-      const result = await nautilusService.backupDatabase(db.toLowerCase());
-      success(result.message);
-    } catch (err) {
-      error(`Failed to backup ${db}`);
+      const res = await api.get<{ backups: BackupFile[] }>("/api/database/backups");
+      setBackups(res.backups ?? []);
+    } catch (e) {
+      error(e instanceof Error ? e.message : "Could not load backups");
+    }
+  }, [error]);
+
+  useEffect(() => {
+    loadBackups();
+    api
+      .get<{ step_up_required?: boolean }>("/api/trading/state")
+      .then((s) => setNeedCode(s.step_up_required !== false))
+      .catch(() => setNeedCode(true));
+  }, [loadBackups]);
+
+  // The backend reports most maintenance failures as HTTP 200 with success:false: check it.
+  const run = async (name: string, path: string, body: Record<string, unknown>) => {
+    setBusy(name);
+    try {
+      const res = await api.post<OpResult>(path, body, { retries: 0 });
+      if (res.success === false) warning(res.message ?? `${name} failed`);
+      else success(res.message ?? `${name} done`);
+    } catch (e) {
+      error(e instanceof Error ? e.message : `${name} failed`);
+    } finally {
+      setBusy(null);
+      loadBackups();
     }
   };
 
-  const handleOptimize = async (db: string) => {
+  const restore = async () => {
+    if (!restoreTarget) return;
+    setBusy("restore");
     try {
-      info(`Optimizing ${db}...`);
-      const result = await nautilusService.optimizeDatabase(db.toLowerCase());
-      success(result.message);
-    } catch (err) {
-      error(`Failed to optimize ${db}`);
+      const res = await api.post<OpResult>(
+        "/api/database/restore",
+        { backup_file: restoreTarget, ...(needCode ? { totp_code: totp } : {}) },
+        { retries: 0 },
+      );
+      success(`${res.message ?? "Restored"}. Trading is disarmed; re-arm it deliberately.`);
+      setRestoreTarget(null);
+      setTotp("");
+    } catch (e) {
+      error(e instanceof Error ? e.message : "Restore failed");
+    } finally {
+      setBusy(null);
+      loadBackups();
     }
   };
 
-  const handleClean = async (db: string) => {
-    try {
-      warning(`Cleaning ${db} cache...`);
-      const result = await nautilusService.cleanCache(db.toLowerCase());
-      success(result.message);
-    } catch (err) {
-      error(`Failed to clean ${db}`);
-    }
-  };
+  const codeOk = !needCode || /^\d{6}$/.test(totp);
 
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold">Database Management</h1>
-            <Button variant="outline" onClick={() => window.location.href = '/admin'}>
-              ← Back to Dashboard
-            </Button>
-          </div>
+        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
+          <h1 className="text-2xl font-bold">Database</h1>
+          <Button variant="outline" onClick={() => (window.location.href = "/admin")}>
+            ← Back to Dashboard
+          </Button>
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-8">
-        <div className="grid md:grid-cols-3 gap-6">
-          {/* PostgreSQL */}
-          <Card>
-            <CardHeader>
-              <CardTitle>🐘 PostgreSQL</CardTitle>
-              <CardDescription>Main database cache</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <Button className="w-full" onClick={() => handleBackup('PostgreSQL')}>
-                Backup Database
-              </Button>
-              <Button className="w-full" variant="outline" onClick={() => handleOptimize('PostgreSQL')}>
-                Optimize Tables
-              </Button>
-            </CardContent>
-          </Card>
-
-          {/* Parquet */}
-          <Card>
-            <CardHeader>
-              <CardTitle>📊 Parquet</CardTitle>
-              <CardDescription>Data catalog storage</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <Button className="w-full" onClick={() => handleBackup('Parquet')}>
-                Export Catalog
-              </Button>
-              <Button className="w-full" variant="outline" onClick={() => handleClean('Parquet')}>
-                Clean Old Files
-              </Button>
-            </CardContent>
-          </Card>
-
-          {/* Redis */}
-          <Card>
-            <CardHeader>
-              <CardTitle>⚡ Redis</CardTitle>
-              <CardDescription>In-memory cache</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <Button className="w-full" onClick={() => handleClean('Redis')}>
-                Flush Cache
-              </Button>
-              <Button className="w-full" variant="outline" onClick={() => info('Redis stats: 1.2M keys, 85% memory')}>
-                View Stats
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Maintenance Actions */}
-        <Card className="mt-6">
+      <main className="container mx-auto px-4 py-8 space-y-6">
+        <Card>
           <CardHeader>
-            <CardTitle>🔧 Maintenance Actions</CardTitle>
+            <CardTitle>Maintenance</CardTitle>
+            <CardDescription>The system stores its data in a single SQLite database.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid md:grid-cols-3 gap-4">
+            <Button disabled={busy !== null} onClick={() => run("Backup", "/api/database/backup", { db_type: "all" })}>
+              {busy === "Backup" ? "Backing up…" : "Create backup"}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={busy !== null}
+              onClick={() => run("Optimize", "/api/database/optimize", { db_type: "all" })}
+            >
+              {busy === "Optimize" ? "Optimizing…" : "Optimize (VACUUM + ANALYZE)"}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={busy !== null}
+              onClick={() => run("Clean", "/api/database/clean", { cache_type: "all" })}
+            >
+              {busy === "Clean" ? "Cleaning…" : "Clean old records (30+ days)"}
+            </Button>
+          </CardContent>
+          <CardContent className="text-xs text-gray-500 pt-0">
+            Clean removes triggered alerts and cancelled paper orders older than 30 days. Trade history and live
+            orders are kept. Backups stay on the same volume: copy them off-host as well.
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Backups ({backups.length})</CardTitle>
+            <CardDescription>Restoring replaces the current database and leaves live trading disarmed.</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid md:grid-cols-4 gap-4">
-              <Button onClick={() => handleBackup('All databases')}>
-                Full Backup
-              </Button>
-              <Button variant="outline" onClick={() => handleOptimize('All databases')}>
-                Optimize All
-              </Button>
-              <Button variant="outline" onClick={() => info('Exporting all data...')}>
-                Export Data
-              </Button>
-              <Button variant="outline" onClick={() => info('Opening logs...')}>
-                View Logs
-              </Button>
-            </div>
+            {backups.length === 0 ? (
+              <p className="text-sm text-gray-500">No backups yet.</p>
+            ) : (
+              <ul className="divide-y">
+                {backups.map((b) => (
+                  <li key={b.filename} className="flex items-center justify-between py-2 text-sm">
+                    <span>
+                      <span className="font-mono">{b.filename}</span>
+                      <span className="ml-3 text-gray-500">
+                        {b.size_mb} MB · {new Date(b.created_at).toLocaleString()}
+                      </span>
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy !== null}
+                      onClick={() => setRestoreTarget(b.filename)}
+                    >
+                      Restore
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </CardContent>
         </Card>
       </main>
+
+      <AlertDialog
+        open={restoreTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRestoreTarget(null);
+            setTotp("");
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restore {restoreTarget}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This rewinds orders, trading state and risk limits to the backup. A safety snapshot of the current
+              database is saved first, and live trading is disarmed afterwards.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {needCode && (
+            <input
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              value={totp}
+              onChange={(e) => setTotp(e.target.value.replace(/\D/g, ""))}
+              placeholder="6-digit authenticator code"
+              className="w-full rounded border px-3 py-2 text-sm"
+            />
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button variant="destructive" disabled={busy !== null || !codeOk} onClick={restore}>
+              {busy === "restore" ? "Restoring…" : "Restore"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
-
