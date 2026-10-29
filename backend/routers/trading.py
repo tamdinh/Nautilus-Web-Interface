@@ -44,7 +44,8 @@ async def _readiness() -> dict:
     venues = live_manager.ready_venues()
     if not venues:
         problems.append("no exchange adapter is connected and verified")
-    return {"ready_for_live": not problems, "problems": problems, "venues": venues}
+    return {"ready_for_live": not problems, "problems": problems, "venues": venues,
+            "environments": live_manager.environments()}
 
 
 @router.get("/state")

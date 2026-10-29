@@ -57,6 +57,7 @@ class AdapterConnection:
     status: str = "connected"
     node: Any = None  # reserved for future TradingNode reference
     # REST clients (set after successful connect)
+    environment: str = "live"      # Binance: "demo" (fake funds) or "live"; other venues are always "live"
     binance_spot_api: Any = None   # BinanceRestClient
     bybit_account_api: Any = None  # BybitRestClient
 
@@ -99,6 +100,7 @@ class LiveTradingManager:
                 k: {
                     "adapter_id": v.adapter_id,
                     "status": v.status,
+                    "environment": v.environment,
                     "connection_id": v.connection_id,
                 }
                 for k, v in self._connections.items()
@@ -108,25 +110,25 @@ class LiveTradingManager:
     # ── Adapter connections ───────────────────────────────────────────────────
 
     @staticmethod
-    def _make_binance_spot_api(api_key: str, api_secret: str) -> BinanceRestClient:
-        """Build a signed Binance Spot REST client."""
-        return BinanceRestClient(api_key, api_secret)
+    def _make_binance_spot_api(api_key: str, api_secret: str, environment: str = "demo") -> BinanceRestClient:
+        """Build a signed Binance Spot REST client for the demo or production exchange."""
+        return BinanceRestClient(api_key, api_secret, environment=environment)
 
     @staticmethod
     def _make_bybit_account_api(api_key: str, api_secret: str) -> BybitRestClient:
         """Build a signed Bybit v5 REST client."""
         return BybitRestClient(api_key, api_secret)
 
-    async def connect_binance(self, api_key: str, api_secret: str) -> Dict[str, Any]:
+    async def connect_binance(self, api_key: str, api_secret: str, environment: str = "demo") -> Dict[str, Any]:
         """
-        Connect Binance Spot adapter using the signed REST client.
+        Connect Binance Spot adapter using the signed REST client (Demo Mode by default).
         Verifies credentials via _verify_binance_credentials().
         """
         async with self._lock:
             if not api_key or not api_secret:
                 raise ConnectionError("api_key and api_secret are required")
 
-            spot_api = self._make_binance_spot_api(api_key, api_secret)
+            spot_api = self._make_binance_spot_api(api_key, api_secret, environment)
             verified = False
             account_info: Dict[str, Any] = {}
 
@@ -147,12 +149,14 @@ class LiveTradingManager:
                 adapter_id="binance",
                 connection_id=connection_id,
                 status=status,
+                environment=environment,
                 binance_spot_api=spot_api,
             )
             self._is_active = True
             return {
                 "success": True,
                 "connection_id": connection_id,
+                "environment": environment,
                 "verified": verified,
                 "account_info": account_info,
             }
@@ -259,7 +263,12 @@ class LiveTradingManager:
                 if adapter_id == "bybit":
                     await self.connect_bybit(key, secret)
                 else:
-                    await self.connect_binance(key, secret)
+                    env = "demo"
+                    try:
+                        env = json.loads(cfg.get("extra_config") or "{}").get("environment", "demo")
+                    except (TypeError, ValueError):
+                        pass
+                    await self.connect_binance(key, secret, environment=env)
                 logger.info("restored %s connection", adapter_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("could not restore %s: %s", adapter_id, exc)
@@ -289,6 +298,15 @@ class LiveTradingManager:
         if not LiveTradingManager._SYMBOL_RE.match(sym):
             raise ValueError(f"'{instrument}' is not a valid exchange symbol")
         return sym
+
+    def environments(self) -> Dict[str, str]:
+        """Environment ("demo" / "live") of each verified venue connection."""
+        out: Dict[str, str] = {}
+        for adapter_id, conn in self._connections.items():
+            venue = self._VENUE_OF_ADAPTER.get(adapter_id)
+            if venue and conn.status == "connected":
+                out[venue] = conn.environment
+        return out
 
     def ready_venues(self) -> List[str]:
         """Venues with a *verified* connection (credentials accepted by the exchange)."""

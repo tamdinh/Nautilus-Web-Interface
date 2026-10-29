@@ -54,6 +54,9 @@ class FakeManager:
     def is_connected(self, adapter_id=None):
         return self.connected
 
+    def environments(self):
+        return {v: "demo" for v in self.ready_venues()}
+
     def ready_venues(self):
         return list(self.venues) if self.connected else []
 

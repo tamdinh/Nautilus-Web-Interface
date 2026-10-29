@@ -15,6 +15,7 @@ Single supported deployment: Docker Compose on Dokploy. **Exactly one backend re
 | `CORS_ORIGINS` | yes | Exact frontend origin(s), e.g. `https://app.example.com` |
 | `FORWARDED_ALLOW_IPS` | yes | Network/IP of Traefik so rate limits see real client IPs |
 | `VITE_NAUTILUS_API_URL`, `VITE_WS_URL` | yes (build args) | Public API/WS URLs baked into the frontend bundle |
+| `ALLOW_PRODUCTION_TRADING` | no | Leave unset: exchange adapters default to the Binance Demo environment (fake funds, keys from demo.binance.com) and production connections are refused (403). Set to `1` only after the go-live gates pass. |
 | `LOG_LEVEL`, `LOG_FORMAT` | no | JSON logs by default (`LOG_FORMAT=text` for local); each request has an `X-Request-ID` |
 
 The backend refuses to start on missing or weak secrets.

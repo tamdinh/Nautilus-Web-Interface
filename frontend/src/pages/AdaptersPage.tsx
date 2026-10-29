@@ -12,6 +12,7 @@ interface Adapter {
   docs_url: string;
   supports_live: boolean;
   supports_backtest: boolean;
+  environment?: string | null;
 }
 
 interface AdapterState {
@@ -19,7 +20,7 @@ interface AdapterState {
   apiKey: string;
   apiSecret: string;
   endpoint: string;
-  testnet: boolean;
+  environment: 'demo' | 'live';
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -60,7 +61,7 @@ export default function AdaptersPage() {
             apiKey: a.has_credentials ? '••••••••' : '',
             apiSecret: '',
             endpoint: '',
-            testnet: false,
+            environment: a.environment === 'live' ? 'live' : 'demo',
           };
         });
         setStates(initial);
@@ -128,13 +129,14 @@ export default function AdaptersPage() {
       await api.post(`/api/adapters/${adapterId}/connect`, {
         api_key: apiKey,
         api_secret: apiSecret || null,
+        environment: state?.environment ?? 'demo',
       });
       setStates(prev => ({
         ...prev,
         [adapterId]: { ...prev[adapterId], connected: true, apiKey: '••••••••', apiSecret: '' },
       }));
       setConfigOpen(null);
-      success('Adapter connected and credentials saved');
+      success(`Adapter connected (${(adapterId === 'binance' || adapterId === 'binance_futures') ? (state?.environment === 'live' ? 'PRODUCTION' : 'Binance demo') : 'production'}) and credentials saved`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Connection failed';
       notifyError(msg);
@@ -303,16 +305,26 @@ export default function AdaptersPage() {
                           className="w-full px-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:border-cyan-400"
                         />
                       </div>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          id={`testnet-${adapter.id}`}
-                          checked={states[adapter.id]?.testnet ?? false}
-                          onChange={e => setStates(prev => ({ ...prev, [adapter.id]: { ...prev[adapter.id], testnet: e.target.checked } }))}
-                          className="rounded"
-                        />
-                        <label htmlFor={`testnet-${adapter.id}`} className="text-xs text-gray-600">Use testnet/paper trading</label>
-                      </div>
+                      {(adapter.id === 'binance' || adapter.id === 'binance_futures') ? (
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-600 mb-1">Environment</label>
+                          <select
+                            value={states[adapter.id]?.environment ?? 'demo'}
+                            onChange={e => setStates(prev => ({ ...prev, [adapter.id]: { ...prev[adapter.id], environment: e.target.value as 'demo' | 'live' } }))}
+                            className="w-full px-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:border-cyan-400"
+                          >
+                            <option value="demo">Binance Demo (fake funds, recommended)</option>
+                            <option value="live">Production (REAL money)</option>
+                          </select>
+                          <p className="mt-1 text-xs text-gray-500">
+                            {(states[adapter.id]?.environment ?? 'demo') === 'demo'
+                              ? 'Use API keys created at demo.binance.com (Binance Demo Trading). Orders use virtual balances.'
+                              : 'Production is blocked unless the server sets ALLOW_PRODUCTION_TRADING=1.'}
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-500">This adapter connects to the production exchange.</p>
+                      )}
                       <button
                         onClick={() => void saveConfig(adapter.id)}
                         className="w-full py-1.5 bg-cyan-600 text-white rounded-lg text-xs font-semibold hover:bg-cyan-700"

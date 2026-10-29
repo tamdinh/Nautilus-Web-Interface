@@ -161,6 +161,16 @@ Trước đây "Start" chỉ đổi cờ trạng thái, không có gì chạy. N
 - [x] Chiến lược trên instrument giả lập (`EUR/USD.SIM`) vẫn chỉ chạy backtest; UI và API (`executes_orders`) nói rõ. `GET /api/strategies/{id}/paper` trả vị thế, P&L đã chốt và các lệnh giả lập.
 - [ ] Giới hạn đã biết: chỉ polling (mặc định 20s) nên trễ tối đa một chu kỳ; chỉ spot long-only, một vị thế mỗi chiến lược; không mô phỏng trượt giá/độ sâu sổ lệnh; chỉ báo viết lại thuần Python nên không trùng khít backtest Nautilus; không tính vị thế chưa chốt vào P&L; chưa kiểm chứng với dữ liệu thật của Binance (chỉ test với dữ liệu giả); chưa có runtime live (lệnh live vẫn đặt tay qua Orders).
 
+### Phase H — Môi trường sàn: Binance Demo mặc định (2026-10-29)
+
+Phát hiện: ô "Use testnet/paper trading" ở trang Adapters **không được backend đọc**, nên mọi kết nối Binance đều đi thẳng `api.binance.com` (production). Đã sửa:
+
+- [x] Môi trường tường minh cho Binance: `demo` (Binance Demo Mode, `https://demo-api.binance.com`, key tạo ở demo.binance.com, tiền ảo) là **mặc định**; `live` là production. Lưu trong `extra_config`, khôi phục đúng khi restart; kết nối cũ không có môi trường coi như `demo`.
+- [x] Kết nối production bị chặn (403 `production_trading_disabled`) trừ khi server đặt `ALLOW_PRODUCTION_TRADING=1`; áp dụng cả Bybit (chỉ có production). `BINANCE_BASE_URL` vẫn ghi đè (test/proxy).
+- [x] UI: ô chọn môi trường (Demo/Production) thay checkbox giả; banner hiện "Binance DEMO: fake funds" hay "PRODUCTION exchange"; `/api/trading/state` trả `environments`.
+- [ ] Chưa kiểm chứng với tài khoản Binance Demo thật (chỉ test với sàn giả); dữ liệu thị trường công khai (giá, nến cho paper runtime) vẫn lấy từ `api.binance.com`; WebSocket demo chưa dùng; Bybit chưa có chế độ demo (`api-demo.bybit.com`).
+- Lưu ý: kịch bản testnet ở Phase C nay có thể chạy bằng Binance Demo thay vì `testnet.binance.vision`.
+
 ### Phase F — Dọn dẹp và tài liệu
 
 - [x] Disclaimer rủi ro ở README và màn đăng nhập; bỏ "Production Ready" khỏi README. [ ] DocsPage.

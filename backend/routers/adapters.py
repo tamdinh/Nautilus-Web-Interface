@@ -8,8 +8,9 @@ BacktestEngine mode.  This router validates credentials format and stores
 status so the UI reflects the correct state across restarts.
 """
 
+import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -122,6 +123,9 @@ _ADAPTER_BY_ID = {a["id"]: a for a in _ADAPTERS}
 class AdapterConnectRequest(BaseModel):
     api_key: Optional[str] = None
     api_secret: Optional[str] = None
+    # Binance only: "demo" = Binance Demo Mode (fake funds, keys from demo.binance.com, the default);
+    # "live" = production exchange with real money (needs ALLOW_PRODUCTION_TRADING=1 on the server).
+    environment: Literal["demo", "live"] = "demo"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -155,6 +159,7 @@ async def _enrich(adapter: dict) -> dict:
         "has_credentials": has_credentials,
         "api_key_masked": api_key_masked,
         "connection_id": extra.get("connection_id"),
+        "environment": extra.get("environment"),
     }
 
 
@@ -214,6 +219,16 @@ async def connect_adapter(adapter_id: str, req: AdapterConnectRequest, _admin: d
     if api_secret and not _safe_re.match(api_secret):
         raise HTTPException(status_code=400, detail="api_secret contains invalid characters")
 
+    # Binance honours the requested environment; the other exchange adapters only talk to production
+    exchange_adapter = adapter_id in ("binance", "binance_futures", "bybit")
+    environment = req.environment if adapter_id in ("binance", "binance_futures") else "live"
+    if exchange_adapter and environment == "live" and os.getenv("ALLOW_PRODUCTION_TRADING", "0") != "1":
+        raise HTTPException(status_code=403, detail={
+            "error": "production_trading_disabled",
+            "message": ("Connecting to a production exchange is disabled on this server. Use the Binance demo "
+                        "environment, or set ALLOW_PRODUCTION_TRADING=1 once the go-live gates have passed."),
+        })
+
     # Encrypt credentials before storing
     from credential_utils import encrypt_credential
     encrypted_key = encrypt_credential(api_key) if api_key else ""
@@ -231,7 +246,7 @@ async def connect_adapter(adapter_id: str, req: AdapterConnectRequest, _admin: d
     connection_id = None
     try:
         if adapter_id in ("binance", "binance_futures"):
-            result = await live_manager.connect_binance(api_key, api_secret)
+            result = await live_manager.connect_binance(api_key, api_secret, environment=environment)
             connection_id = result.get("connection_id")
         elif adapter_id == "bybit":
             result = await live_manager.connect_bybit(api_key, api_secret)
@@ -240,6 +255,8 @@ async def connect_adapter(adapter_id: str, req: AdapterConnectRequest, _admin: d
 
         import json
         extra = {"connection_id": connection_id} if connection_id else {}
+        if exchange_adapter:
+            extra["environment"] = environment
         # Only a connection the exchange actually verified is "connected"; an unreachable exchange
         # leaves it "connected_offline", which can never carry live orders.
         verified = adapter_id not in ("binance", "binance_futures", "bybit") or bool(result.get("verified"))
@@ -258,6 +275,7 @@ async def connect_adapter(adapter_id: str, req: AdapterConnectRequest, _admin: d
             "adapter_id": adapter_id,
             "status": status,
             "connection_id": connection_id,
+            "environment": environment if exchange_adapter else None,
             "message": (f"Adapter '{meta['name']}' connected." if verified else
                         f"Adapter '{meta['name']}' saved but the exchange could not be reached to verify the credentials."),
             "last_connected": datetime.now(timezone.utc).isoformat(),

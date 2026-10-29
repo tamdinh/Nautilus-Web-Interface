@@ -802,3 +802,23 @@ def test_strategy_start_is_honest_and_params_are_used(client):
     assert started["executes_orders"] is False
     listed = [s for s in client.get("/api/strategies").json()["strategies"] if s["id"] == sid][0]
     assert listed["config"]["fast_period"] == 5 and listed["executes_orders"] is False
+
+
+def test_adapter_defaults_to_demo_and_production_is_blocked(client, monkeypatch):
+    from unittest.mock import AsyncMock, patch
+    monkeypatch.delenv("ALLOW_PRODUCTION_TRADING", raising=False)
+    with patch("live_trading.LiveTradingManager.connect_binance", new_callable=AsyncMock) as m:
+        m.return_value = {"success": True, "verified": True, "connection_id": "C1"}
+        ok = client.post("/api/adapters/binance/connect", json={"api_key": "demokey12345", "api_secret": "demosecret12345"})
+        assert ok.status_code == 200 and ok.json()["environment"] == "demo"
+        assert m.call_args.kwargs["environment"] == "demo"
+        blocked = client.post("/api/adapters/binance/connect",
+                              json={"api_key": "demokey12345", "api_secret": "demosecret12345", "environment": "live"})
+        assert blocked.status_code == 403
+        assert blocked.json()["detail"]["error"] == "production_trading_disabled"
+        monkeypatch.setenv("ALLOW_PRODUCTION_TRADING", "1")
+        allowed = client.post("/api/adapters/binance/connect",
+                              json={"api_key": "demokey12345", "api_secret": "demosecret12345", "environment": "live"})
+        assert allowed.status_code == 200 and allowed.json()["environment"] == "live"
+    listed = [a for a in client.get("/api/adapters").json()["adapters"] if a["id"] == "binance"][0]
+    assert listed["environment"] == "live"

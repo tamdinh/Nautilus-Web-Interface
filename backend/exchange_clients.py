@@ -216,15 +216,29 @@ class _BaseClient:
         raise NotImplementedError
 
 
+# Binance Spot environments. "demo" is Binance Demo Mode (fake funds, keys from demo.binance.com);
+# "live" is the production exchange (real money).
+BINANCE_ENVIRONMENTS = {
+    "demo": "https://demo-api.binance.com",
+    "live": "https://api.binance.com",
+}
+DEFAULT_BINANCE_ENVIRONMENT = "demo"
+
+
 class BinanceRestClient(_BaseClient):
     """Binance Spot signed REST client (HMAC-SHA256)."""
 
     venue = "BINANCE"
 
     def __init__(self, api_key: str, api_secret: str, base_url: Optional[str] = None,
-                 timeout: float = 10.0, recv_window: int = 5000) -> None:
+                 timeout: float = 10.0, recv_window: int = 5000,
+                 environment: str = DEFAULT_BINANCE_ENVIRONMENT) -> None:
+        if environment not in BINANCE_ENVIRONMENTS:
+            raise ValueError(f"unknown Binance environment: {environment!r}")
+        self.environment = environment
+        # an explicit base_url / BINANCE_BASE_URL (tests, proxies) wins over the environment's URL
         super().__init__(api_key, api_secret,
-                         base_url or os.getenv("BINANCE_BASE_URL", "https://api.binance.com"),
+                         base_url or os.getenv("BINANCE_BASE_URL") or BINANCE_ENVIRONMENTS[environment],
                          timeout, recv_window)
 
     async def sync_time(self) -> int:

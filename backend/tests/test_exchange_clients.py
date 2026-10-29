@@ -446,3 +446,22 @@ async def test_free_balance_reads_only_unlocked_funds(mock_http):
         {"asset": "BTC", "free": "0.4", "locked": "0.1"}, {"asset": "ETH", "free": "2", "locked": "0"}]})
     assert await mgr.free_balance("BINANCE", "BTC") == Decimal("0.4")
     assert await mgr.free_balance("BINANCE", "DOGE") == Decimal("0")
+
+
+# ── Binance environments (demo by default) ──────────────────────────────────
+
+def test_binance_client_defaults_to_demo_and_live_is_explicit(monkeypatch):
+    monkeypatch.delenv("BINANCE_BASE_URL", raising=False)
+    from exchange_clients import BinanceRestClient
+    demo = BinanceRestClient("key12345", "secret12345")
+    assert demo.environment == "demo" and demo._base_url == "https://demo-api.binance.com"
+    live = BinanceRestClient("key12345", "secret12345", environment="live")
+    assert live._base_url == "https://api.binance.com"
+    with pytest.raises(ValueError):
+        BinanceRestClient("key12345", "secret12345", environment="testnet")
+
+
+def test_base_url_env_override_still_wins(monkeypatch):
+    monkeypatch.setenv("BINANCE_BASE_URL", "http://127.0.0.1:9")
+    from exchange_clients import BinanceRestClient
+    assert BinanceRestClient("key12345", "secret12345")._base_url == "http://127.0.0.1:9"

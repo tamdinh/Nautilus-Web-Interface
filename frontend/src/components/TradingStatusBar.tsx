@@ -21,6 +21,7 @@ interface TradingState {
   ready_for_live?: boolean;
   problems?: string[];
   step_up_required?: boolean;
+  environments?: Record<string, string>;
 }
 
 const POLL_MS = 5000;
@@ -171,10 +172,14 @@ export default function TradingStatusBar() {
       : live
         ? 'bg-orange-500 text-black'
         : 'bg-blue-700 text-white';
+  const envs = Object.values(state?.environments ?? {});
+  const venueNote = envs.length === 0 ? '' : envs.every((e) => e === 'demo') ? ' [Binance DEMO: fake funds]' : ' [PRODUCTION exchange]';
   const label = stale
     ? 'TRADING STATE UNKNOWN: cannot reach backend'
     : armed
-      ? 'LIVE TRADING ARMED: real orders are sent to the exchange'
+      ? (envs.length > 0 && envs.every((e) => e === 'demo')
+          ? 'LIVE TRADING ARMED on the Binance DEMO exchange: orders use fake funds'
+          : 'LIVE TRADING ARMED: real orders are sent to the exchange')
       : live
         ? 'LIVE mode, DISARMED: orders are rejected'
         : 'PAPER mode: simulated orders only';
@@ -186,6 +191,7 @@ export default function TradingStatusBar() {
     >
       <span>
         {label}
+        {!armed && venueNote}
         {state?.cancel_pending ? ' (cancelling late orders)' : ''}
       </span>
       <div className="flex items-center gap-2">

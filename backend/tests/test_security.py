@@ -77,7 +77,8 @@ class TestCredentialEncryption:
         assert stored_key != "MY_PLAIN_KEY_12345", "api_key stored in plaintext!"
         assert stored_secret != "MY_PLAIN_SECRET_99", "api_secret stored in plaintext!"
 
-    def test_ciphertext_is_not_empty(self, client, db_path):
+    def test_ciphertext_is_not_empty(self, client, db_path, monkeypatch):
+        monkeypatch.setenv("ALLOW_PRODUCTION_TRADING", "1")  # Bybit only has a production environment
         """The stored ciphertext must be non-empty (something was actually stored)."""
         import sqlite3
 
@@ -136,7 +137,8 @@ class TestCredentialEncryption:
         assert masked.endswith("1234"), f"Expected last 4 chars '1234', got '{masked}'"
         assert masked.startswith("*"), "Masked key should start with asterisks"
 
-    def test_different_keys_produce_different_ciphertexts(self, client, db_path):
+    def test_different_keys_produce_different_ciphertexts(self, client, db_path, monkeypatch):
+        monkeypatch.setenv("ALLOW_PRODUCTION_TRADING", "1")  # Bybit only has a production environment
         """Two different keys must produce different ciphertexts (no deterministic IV)."""
         import sqlite3
 
