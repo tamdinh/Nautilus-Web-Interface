@@ -1,3 +1,4 @@
+import TradingStatusBar from "./components/TradingStatusBar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { useEffect, useState } from "react";
@@ -192,6 +193,7 @@ function App() {
           <TooltipProvider>
             <Toaster />
             <NotificationContainer />
+            <TradingStatusBar />
             <Router />
             <LogoutButton onLogout={handleLogout} />
           </TooltipProvider>
